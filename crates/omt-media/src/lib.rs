@@ -26,7 +26,7 @@ pub use receive::{
     VideoFrame,
 };
 pub use send::{
-    AudioToneConfig, DEFAULT_VIDEO_FRAME_BUFFER_FRAMES, MAX_VIDEO_FRAME_BUFFER_FRAMES,
+    AudioToneConfig, DEFAULT_VIDEO_FRAME_BUFFER_FRAMES, HxSendConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES,
     MIN_VIDEO_FRAME_BUFFER_FRAMES, SendSession, SendSessionConfig, SendStats,
     clamp_video_frame_buffer_frames,
 };

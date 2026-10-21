@@ -79,6 +79,28 @@ pub enum TestPatternsQuality {
     High,
 }
 
+/// How Test Patterns sends its source.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SendMode {
+    /// Plain OMT with VMX.
+    #[default]
+    Full,
+    /// OMT HX (HEVC or H.264 inside OMT).
+    Hx,
+}
+
+/// Video codec for OMT HX.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum HxCodec {
+    /// H.265 / HEVC.
+    #[default]
+    Hevc,
+    /// H.264 / AVC.
+    H264,
+}
+
 /// Test Patterns tool preferences (`test-patterns.json`).
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
@@ -101,6 +123,10 @@ pub struct TestPatternsConfig {
     pub fps_d: i32,
     /// Encoding quality.
     pub quality: TestPatternsQuality,
+    /// Full OMT or OMT HX.
+    pub send_mode: SendMode,
+    /// Video codec used in HX mode.
+    pub hx_codec: HxCodec,
     /// Whether pattern / image scroll animation is enabled.
     pub animate: bool,
     /// Horizontal scroll speed percent (−200..=200).
@@ -134,6 +160,8 @@ impl Default for TestPatternsConfig {
             fps_n: 30_000,
             fps_d: 1_001,
             quality: TestPatternsQuality::Medium,
+            send_mode: SendMode::Full,
+            hx_codec: HxCodec::Hevc,
             animate: true,
             anim_speed_h_pct: 100,
             anim_speed_v_pct: 100,
@@ -446,6 +474,8 @@ mod tests {
             serde_json::from_str(r#"{"schema_version":1,"custom_images":[]}"#).unwrap();
         assert_eq!(parsed.frame_buffer_frames, 3);
         assert_eq!(parsed.name, "Test Pattern");
+        assert_eq!(parsed.send_mode, SendMode::Full);
+        assert_eq!(parsed.hx_codec, HxCodec::Hevc);
         assert_eq!(parsed.width, 1920);
         assert_eq!(parsed.height, 1080);
         assert_eq!(parsed.fps_n, 30_000);

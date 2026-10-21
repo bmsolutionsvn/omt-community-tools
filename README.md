@@ -52,6 +52,23 @@ The `.deb` installs `/usr/bin/omt-launcher` and the tool binaries in `/usr/bin` 
 
 On Linux the launcher sets `WEBKIT_DISABLE_DMABUF_RENDERER=1` and `WEBKIT_DISABLE_COMPOSITING_MODE=1` at startup. That fixes a scrambled launcher window on Raspberry Pi OS. It applies to every install method, because the workaround is in the launcher binary. The launcher sets each variable only when it is unset, so a value you set yourself wins, including `0` (for example in `/etc/environment`). Set them to `0` to opt out. Child processes started by the launcher inherit these variables.
 
+## OMT HX
+
+Studio Monitor and Test Patterns also speak OMT-HX (HEVC/H.264 inside OMT), through the C API of
+`omthx.dll` (Windows) or `libomthx.so` (Linux). The library is optional and loaded at runtime:
+
+1. `OMTHX_LIBRARY` set to its full path, or
+2. `omthx.dll` / `libomthx.so` beside the tool executable, or
+3. the normal library search path.
+
+Without it both tools work with Full OMT only, and connecting to an HX source or choosing HX in Test
+Patterns reports that the library is missing. On Windows the library needs its FFmpeg DLLs beside it.
+macOS is Full-only for now.
+
+- Studio Monitor picks Full or HX per source (1.5 s probe); there is no mode setting.
+- Test Patterns has a Mode switch (Full / HX) in the footer; HX adds a codec switch (H.265/H.264). The
+  LQ/SQ/HQ profile applies to both modes. Changing mode, codec or profile restarts the sender.
+
 ## License
 
 [PolyForm Shield 1.0.0](https://polyformproject.org/licenses/shield/1.0.0)

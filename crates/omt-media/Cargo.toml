@@ -11,6 +11,7 @@ description = "Shared OMT discovery, receive/send helpers, and frame utilities"
 anyhow.workspace = true
 cpal.workspace = true
 openmediatransport.workspace = true
+omthx.workspace = true
 parking_lot.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

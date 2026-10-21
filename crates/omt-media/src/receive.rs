@@ -1,8 +1,8 @@
 //! Background OMT A/V receive worker (Tokio).
 
 use std::collections::VecDeque;
-use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Once};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
@@ -24,8 +24,13 @@ const METADATA_LOG_CAP: usize = 256;
 pub struct ConnectOptions {
     /// Source URL (`omt://…`).
     pub url: String,
+    /// Discovered instance name (`HOST (Source)`), used to probe the source's mode. Falls back to
+    /// [`url`](Self::url) when absent.
+    pub address: Option<String>,
     /// Discovery-time IP candidates tried before / with URL host resolution.
     pub addresses: Vec<String>,
+    /// Force a mode instead of probing. `None` asks the source (HX when the library is present).
+    pub mode: Option<omthx::Mode>,
     /// Suggested encode quality sent to the peer via subscribe metadata.
     pub quality: Quality,
     /// Request 1/8 progressive Preview (`VideoFlags::PREVIEW` / low bandwidth).
@@ -50,7 +55,9 @@ impl ConnectOptions {
     pub fn new(url: impl Into<String>) -> Self {
         Self {
             url: url.into(),
+            address: None,
             addresses: Vec::new(),
+            mode: None,
             quality: Quality::Default,
             preview: false,
             video_decode: VideoDecodePath::Cpu,
@@ -113,6 +120,10 @@ pub struct LatestVideo {
     pub counters: Mutex<ReceiveCounters>,
     /// Latest audio peak levels for VU.
     pub audio_levels: Mutex<AudioLevels>,
+    /// Mode of the connected source, once known (`None` when no session or no HX library).
+    pub source_mode: Mutex<Option<omthx::Mode>>,
+    /// Decoder in use, for example `hevc (d3d11va)`; `None` for Full and while disconnected.
+    pub decoder: Mutex<Option<String>>,
     /// Effective video buffer delay currently applied (milliseconds).
     pub video_buffer_delay_ms: Mutex<u32>,
     /// Effective audio buffer delay currently applied (milliseconds).
@@ -138,6 +149,8 @@ impl Default for LatestVideo {
             session_state: Mutex::new(SessionState::Stopped),
             counters: Mutex::new(ReceiveCounters::default()),
             audio_levels: Mutex::new(AudioLevels::default()),
+            source_mode: Mutex::new(None),
+            decoder: Mutex::new(None),
             video_buffer_delay_ms: Mutex::new(0),
             audio_buffer_delay_ms: Mutex::new(0),
             metadata_log: Mutex::new(VecDeque::new()),
@@ -403,6 +416,8 @@ async fn worker_loop(
     gpu_ingest: Arc<AtomicBool>,
 ) {
     let mut receiver: Option<ReceiverSession> = None;
+    let mut hx: Option<omthx::Receiver> = None;
+    let mut hx_stats = HxStats::default();
     let mut playout = Playout::default();
     let mut gpu_decode = false;
     let mut gpu_ctx: Option<GpuVideoContext> = None;
@@ -443,7 +458,7 @@ async fn worker_loop(
             publish_buffer_delays(&latest, &playout);
         }
         if pending_disconnect {
-            apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
+            apply_disconnect(&mut receiver, &mut hx, &latest, &stall, &audio, &mut playout);
             gpu_decode = false;
             gpu_ctx = None;
         }
@@ -456,6 +471,7 @@ async fn worker_loop(
                 &audio,
                 &mut playout,
                 &gpu_slot,
+                &mut hx,
             )
             .await;
             gpu_ctx = if gpu_decode {
@@ -465,7 +481,7 @@ async fn worker_loop(
             };
         }
 
-        if receiver.is_none() {
+        if receiver.is_none() && hx.is_none() {
             match rx.recv().await {
                 Some(first) => {
                     let mut pending_connect: Option<ConnectOptions> = None;
@@ -496,7 +512,7 @@ async fn worker_loop(
                         publish_buffer_delays(&latest, &playout);
                     }
                     if pending_disconnect {
-                        apply_disconnect(&mut receiver, &latest, &stall, &audio, &mut playout);
+                        apply_disconnect(&mut receiver, &mut hx, &latest, &stall, &audio, &mut playout);
                         gpu_decode = false;
                         gpu_ctx = None;
                     }
@@ -509,6 +525,7 @@ async fn worker_loop(
                             &audio,
                             &mut playout,
                             &gpu_slot,
+                            &mut hx,
                         )
                         .await;
                         gpu_ctx = if gpu_decode {
@@ -525,6 +542,10 @@ async fn worker_loop(
 
         // Feed the DAC before any video wait. GPU copy/submit on the eframe
         // device can stall while the window is occluded; audio must not wait.
+        if let Some(session) = hx.as_mut() {
+            hx_step(session, &latest, &stall, &audio, &mut playout, &mut hx_stats);
+            continue;
+        }
         let mut got_any = drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
         playout.release(&latest, &audio);
 
@@ -707,6 +728,7 @@ async fn apply_connect(
     audio: &AudioOutput,
     playout: &mut Playout,
     gpu_slot: &Mutex<Option<GpuVideoContext>>,
+    hx: &mut Option<omthx::Receiver>,
 ) -> bool {
     *latest.error.lock() = None;
     // Tear down the previous session before clearing UI state so decode threads
@@ -714,6 +736,7 @@ async fn apply_connect(
     if let Some(old) = receiver.take() {
         old.disconnect();
     }
+    *hx = None;
     // Close the prep identity gate and drop leftover pixels from the previous
     // source before opening the new session. Setting `url` only after connect
     // succeeds prevents republishing the old source under the new selection.
@@ -729,7 +752,40 @@ async fn apply_connect(
     stall.lock().reset();
     *latest.session_state.lock() = SessionState::Connecting;
     *latest.video_decode.lock() = None;
+    *latest.source_mode.lock() = None;
+    *latest.decoder.lock() = None;
     let url = opts.url.clone();
+    // Ask the source what it sends. A timeout means Full, the path that needs no HX library.
+    if omthx::available() {
+        let force_hx = opts.mode == Some(omthx::Mode::Hx);
+        let mut hx_info = None;
+        if !force_hx && opts.mode.is_none() {
+            let address = opts.address.clone().unwrap_or_else(|| url.clone());
+            let probed = tokio::task::spawn_blocking(move || {
+                omthx::probe(&address, Duration::from_millis(1500))
+            })
+            .await
+            .ok()
+            .flatten();
+            if let Some(info) = probed
+                && info.mode == omthx::Mode::Hx
+            {
+                hx_info = Some(info);
+            }
+        }
+        if force_hx || hx_info.is_some() {
+            let address = opts.address.clone().unwrap_or_else(|| url.clone());
+            return connect_hx(&url, &address, hx_info, latest, hx).await;
+        }
+    } else {
+        HX_HINT.call_once(|| {
+            push_log(
+                latest,
+                "info",
+                "OMT HX library not found: Full sources only (omthx.dll / libomthx.so)",
+            );
+        });
+    }
     let want_gpu = opts.video_decode == VideoDecodePath::Gpu;
     let gpu = if want_gpu {
         gpu_slot.lock().clone()
@@ -747,6 +803,7 @@ async fn apply_connect(
     match open_receiver(opts, gpu.clone()).await {
         Ok(r) => {
             *latest.session_state.lock() = r.state();
+            *latest.source_mode.lock() = Some(omthx::Mode::Full);
             *latest.url.lock() = Some(url.clone());
             *receiver = Some(r);
             let path = if gpu_active {
@@ -776,6 +833,7 @@ async fn apply_connect(
 
 fn apply_disconnect(
     receiver: &mut Option<ReceiverSession>,
+    hx: &mut Option<omthx::Receiver>,
     latest: &LatestVideo,
     stall: &Mutex<StallDetector>,
     audio: &AudioOutput,
@@ -784,9 +842,12 @@ fn apply_disconnect(
     if let Some(session) = receiver.take() {
         session.disconnect();
     }
+    *hx = None;
     *latest.url.lock() = None;
     *latest.session_state.lock() = SessionState::Stopped;
     *latest.video_decode.lock() = None;
+    *latest.source_mode.lock() = None;
+    *latest.decoder.lock() = None;
     *latest.stats.lock() = SessionStatistics::default();
     latest.clear_video();
     *latest.audio_levels.lock() = AudioLevels::default();
@@ -794,6 +855,149 @@ fn apply_disconnect(
     playout.reset();
     stall.lock().reset();
     push_log(latest, "info", "disconnected");
+}
+
+/// One-time hint that the optional HX library is absent.
+static HX_HINT: Once = Once::new();
+
+/// HX decode timings, accumulated because the C API reports only the last frame.
+#[derive(Default)]
+struct HxStats {
+    decode_ns: u64,
+    peak_ns: u64,
+}
+
+fn codec_label(codec: omthx::Codec) -> &'static str {
+    match codec {
+        omthx::Codec::Hevc => "HEVC",
+        omthx::Codec::H264 => "H.264",
+    }
+}
+
+/// Open an HX receiver and make it the active session. Returns whether GPU decode is active (never
+/// for HX: pictures are decoded by omthx and arrive as BGRA in memory).
+async fn connect_hx(
+    url: &str,
+    address: &str,
+    info: Option<omthx::Probe>,
+    latest: &LatestVideo,
+    hx: &mut Option<omthx::Receiver>,
+) -> bool {
+    let address = address.to_string();
+    let opened = tokio::task::spawn_blocking(move || omthx::Receiver::open(&address)).await;
+    let mut receiver = match opened {
+        Ok(Ok(receiver)) => receiver,
+        Ok(Err(e)) => {
+            let message = e.to_string();
+            *latest.session_state.lock() = SessionState::Stopped;
+            *latest.error.lock() = Some(message.clone());
+            push_log(latest, "error", message);
+            return false;
+        }
+        Err(e) => {
+            *latest.session_state.lock() = SessionState::Stopped;
+            *latest.error.lock() = Some(e.to_string());
+            push_log(latest, "error", e.to_string());
+            return false;
+        }
+    };
+    let decoder = receiver.decoder().to_string();
+    let detail = match info {
+        Some(info) => format!(
+            "HX {} {}x{} {:.0} fps",
+            codec_label(info.codec),
+            info.format.width,
+            info.format.height,
+            info.format.fps_n as f64 / info.format.fps_d.max(1) as f64,
+        ),
+        None => "HX".to_string(),
+    };
+    *latest.session_state.lock() = SessionState::Connected;
+    *latest.source_mode.lock() = Some(omthx::Mode::Hx);
+    *latest.decoder.lock() = (!decoder.is_empty()).then_some(decoder);
+    *latest.url.lock() = Some(url.to_string());
+    *latest.video_decode.lock() = Some(VideoDecodePath::Cpu);
+    push_log(latest, "info", format!("connected {url} ({detail})"));
+    *hx = Some(receiver);
+    false
+}
+
+/// One poll of the HX session: audio, one picture, stats, then the shared playout.
+fn hx_step(
+    receiver: &mut omthx::Receiver,
+    latest: &LatestVideo,
+    stall: &Mutex<StallDetector>,
+    audio: &AudioOutput,
+    playout: &mut Playout,
+    HxStats { decode_ns, peak_ns }: &mut HxStats,
+) {
+    let mut got_any = false;
+    loop {
+        let packet = tokio::task::block_in_place(|| receiver.recv_audio(Duration::ZERO));
+        let Some(packet) = packet else { break };
+        // The C API hands back f32 samples; playout wants the same bytes as u8.
+        let bytes = unsafe {
+            std::slice::from_raw_parts(
+                packet.planar.as_ptr() as *const u8,
+                std::mem::size_of_val(packet.planar),
+            )
+        };
+        playout.push_audio(
+            packet.timestamp,
+            Arc::from(bytes),
+            packet.channels,
+            packet.samples,
+            packet.sample_rate,
+        );
+        got_any = true;
+    }
+
+    let mut got_frame = false;
+    if let Some(frame) = tokio::task::block_in_place(|| receiver.recv_video(Duration::from_millis(5)))
+    {
+        if frame.width > 0 && frame.height > 0 {
+            let video = VideoFrame {
+                width: frame.width,
+                height: frame.height,
+                bgra: Arc::from(frame.bgra),
+                timestamp: frame.timestamp,
+                fps_n: frame.fps_n as i32,
+                fps_d: frame.fps_d.max(1) as i32,
+            };
+            stall.lock().on_frame(video.fps_n, video.fps_d);
+            playout.push_video(video);
+            got_any = true;
+            got_frame = true;
+        }
+    }
+
+    let counters = receiver.stats();
+    if got_frame {
+        // The decoder name exists only after the first picture was decoded.
+        if latest.decoder.lock().is_none() {
+            let name = receiver.decoder().to_string();
+            if !name.is_empty() {
+                *latest.decoder.lock() = Some(name);
+            }
+        }
+        let last = (counters.decode_ms.max(0.0) * 1_000_000.0) as u64;
+        *decode_ns = decode_ns.saturating_add(last);
+        *peak_ns = (*peak_ns).max(last);
+    }
+    {
+        let mut stats = latest.stats.lock();
+        stats.frames_decoded = counters.frames_received;
+        stats.bytes_received = counters.bytes_received;
+        stats.frames_dropped_decode = counters.frames_discarded;
+        stats.codec_time_ns = *decode_ns;
+        stats.codec_time_ns_peak = *peak_ns;
+    }
+
+    if !got_any {
+        stall.lock().tick();
+    }
+    playout.release(latest, audio);
+    publish_buffer_delays(latest, playout);
 }
 
 async fn open_receiver(

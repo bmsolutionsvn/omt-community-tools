@@ -1,0 +1,12 @@
+[package]
+name = "omthx"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+description = "Runtime binding to the OMT-HX C API (omthx.dll / libomthx.so)"
+
+[dependencies]
+libloading = "0.8"
+thiserror.workspace = true

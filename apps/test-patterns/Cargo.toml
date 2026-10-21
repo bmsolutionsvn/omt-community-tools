@@ -17,6 +17,7 @@ clap.workspace = true
 gpui.workspace = true
 image.workspace = true
 omt-media.workspace = true
+omthx.workspace = true
 openmediatransport.workspace = true
 parking_lot.workspace = true
 pattern-generator.workspace = true

@@ -10,7 +10,7 @@ use gpui::{
 use omt_media::SendStats;
 use openmediatransport::Quality;
 use pattern_generator::PatternKind;
-use suite_core::{Language, SimdCapabilities, t};
+use suite_core::{HxCodec, Language, SendMode, SimdCapabilities, t};
 
 use super::PatternsView;
 use super::presets::*;
@@ -68,7 +68,14 @@ pub(crate) fn stats_block(
             t(language, "patterns.audio_subs"),
             format!("{}", stats.audio_subscribers),
         ))
-        .child(stat_row("Port", format!("{}", stats.port)))
+        .child(stat_row(
+            "Port",
+            if stats.port == 0 {
+                "—".to_string()
+            } else {
+                stats.port.to_string()
+            },
+        ))
         .child(stat_row("Video FPS", format!("{:.1}", stats.video_fps)))
         .child(stat_row("Encode", format!("{:.1} ms", stats.encode_ms)))
         .child(stat_row("Frames", format!("{}", stats.frames)))
@@ -1036,6 +1043,83 @@ pub(crate) fn quality_control(
                         .child(quality_label(quality))
                         .on_click(cx.listener(move |this, _, _, cx| {
                             this.set_quality(quality, cx);
+                        }))
+                        .into_any_element()
+                })),
+        )
+}
+
+/// Full OMT / OMT HX switch. HX is greyed out when the library is missing.
+pub(crate) fn mode_control(
+    cx: &mut Context<PatternsView>,
+    _language: Language,
+    selected: SendMode,
+) -> impl IntoElement {
+    let hx_available = omthx::available();
+    let modes = [(SendMode::Full, "Full"), (SendMode::Hx, "HX")];
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .flex_shrink_0()
+        .child(div().text_xs().opacity(0.65).child("Mode"))
+        .child(
+            div()
+                .flex()
+                .rounded_md()
+                .overflow_hidden()
+                .children(modes.into_iter().map(|(mode, label)| {
+                    let active = selected == mode;
+                    let disabled = mode == SendMode::Hx && !hx_available;
+                    div()
+                        .id(SharedString::from(format!("send-mode-{label}")))
+                        .px_3()
+                        .py_1()
+                        .bg(if active { rgb(0x2f6fed) } else { rgb(0x243041) })
+                        .opacity(if disabled { 0.4 } else { 1.0 })
+                        .cursor_pointer()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_send_mode(mode, cx);
+                        }))
+                        .into_any_element()
+                })),
+        )
+}
+
+/// H.265 / H.264 switch, shown in HX mode.
+pub(crate) fn codec_control(
+    cx: &mut Context<PatternsView>,
+    _language: Language,
+    selected: HxCodec,
+) -> impl IntoElement {
+    let codecs = [(HxCodec::Hevc, "H.265"), (HxCodec::H264, "H.264")];
+    div()
+        .flex()
+        .flex_col()
+        .gap_1()
+        .flex_shrink_0()
+        .child(div().text_xs().opacity(0.65).child("Codec"))
+        .child(
+            div()
+                .flex()
+                .rounded_md()
+                .overflow_hidden()
+                .children(codecs.into_iter().map(|(codec, label)| {
+                    let active = selected == codec;
+                    div()
+                        .id(SharedString::from(format!("hx-codec-{label}")))
+                        .px_3()
+                        .py_1()
+                        .bg(if active { rgb(0x2f6fed) } else { rgb(0x243041) })
+                        .cursor_pointer()
+                        .text_xs()
+                        .font_weight(FontWeight::SEMIBOLD)
+                        .child(label)
+                        .on_click(cx.listener(move |this, _, _, cx| {
+                            this.set_hx_codec(codec, cx);
                         }))
                         .into_any_element()
                 })),

@@ -59,6 +59,24 @@ impl Default for AudioToneConfig {
     }
 }
 
+/// HX settings for a send session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HxSendConfig {
+    /// Encoding quality.
+    pub quality: omthx::Quality,
+    /// Video codec.
+    pub codec: omthx::Codec,
+}
+
+impl Default for HxSendConfig {
+    fn default() -> Self {
+        Self {
+            quality: omthx::Quality::Medium,
+            codec: omthx::Codec::Hevc,
+        }
+    }
+}
+
 /// Configuration for an outbound test / capture session.
 #[derive(Debug, Clone)]
 pub struct SendSessionConfig {
@@ -80,6 +98,8 @@ pub struct SendSessionConfig {
     pub frame_buffer_frames: u32,
     /// Audio tone settings.
     pub audio: AudioToneConfig,
+    /// Send as OMT HX instead of Full OMT. `None` keeps the Full path.
+    pub hx: Option<HxSendConfig>,
 }
 
 impl Default for SendSessionConfig {
@@ -94,6 +114,7 @@ impl Default for SendSessionConfig {
             animate: true,
             frame_buffer_frames: DEFAULT_VIDEO_FRAME_BUFFER_FRAMES,
             audio: AudioToneConfig::default(),
+            hx: None,
         }
     }
 }
@@ -135,6 +156,7 @@ pub struct SendSession {
     animate: Arc<AtomicBool>,
     content_epoch: Arc<AtomicU64>,
     sender: Option<Arc<Mutex<Sender>>>,
+    hx: Option<Arc<omthx::Sender>>,
     discovery: Option<Discovery>,
     source_name: String,
     fps_n: Arc<AtomicI32>,
@@ -147,6 +169,9 @@ pub struct SendSession {
 impl SendSession {
     /// Start sending frames produced by `provider` (returns UYVY bytes per frame index).
     pub fn start(config: SendSessionConfig, provider: FrameProvider) -> Result<Self, OmtError> {
+        if let Some(hx) = config.hx {
+            return Self::start_hx(config, hx, provider);
+        }
         let sender = Arc::new(Mutex::new(Sender::create_with_config(
             &config.name,
             FrameType::VIDEO | FrameType::AUDIO | FrameType::METADATA,
@@ -234,8 +259,87 @@ impl SendSession {
             animate,
             content_epoch,
             sender: Some(sender),
+            hx: None,
             discovery: Some(discovery),
             source_name,
+            fps_n,
+            fps_d,
+            frame_buffer_frames,
+            audio_join: Some(audio_join),
+            video_join: Some(video_join),
+        })
+    }
+
+    /// Start an HX send session: omthx owns discovery and encoding.
+    fn start_hx(
+        config: SendSessionConfig,
+        hx: HxSendConfig,
+        provider: FrameProvider,
+    ) -> Result<Self, OmtError> {
+        let sender = Arc::new(
+            omthx::Sender::open(&config.name, omthx::Mode::Hx, hx.quality, hx.codec)
+                .map_err(|e| OmtError::Codec(e.to_string()))?,
+        );
+        let running = Arc::new(AtomicBool::new(true));
+        let stats = Arc::new(Mutex::new(SendStats::default()));
+        let audio = Arc::new(Mutex::new(config.audio.clone()));
+        let animate = Arc::new(AtomicBool::new(config.animate));
+        let content_epoch = Arc::new(AtomicU64::new(0));
+        let fps_n = Arc::new(AtomicI32::new(config.fps_n.max(1)));
+        let fps_d = Arc::new(AtomicI32::new(config.fps_d.max(1)));
+        let frame_buffer_frames = Arc::new(AtomicU32::new(clamp_video_frame_buffer_frames(
+            config.frame_buffer_frames,
+        ) as u32));
+        let epoch = Instant::now();
+
+        let audio_join = thread::Builder::new()
+            .name("omthx-send-audio".into())
+            .spawn({
+                let sender = Arc::clone(&sender);
+                let audio = Arc::clone(&audio);
+                let running = Arc::clone(&running);
+                move || hx_audio_loop(sender, audio, running, epoch)
+            })?;
+
+        let video_join = thread::Builder::new()
+            .name("omthx-send-video".into())
+            .spawn({
+                let sender = Arc::clone(&sender);
+                let cfg = config.clone();
+                let animate = Arc::clone(&animate);
+                let content_epoch = Arc::clone(&content_epoch);
+                let fps_n = Arc::clone(&fps_n);
+                let fps_d = Arc::clone(&fps_d);
+                let frame_buffer = Arc::clone(&frame_buffer_frames);
+                let running = Arc::clone(&running);
+                let stats = Arc::clone(&stats);
+                move || {
+                    hx_video_loop(
+                        sender,
+                        cfg,
+                        provider,
+                        animate,
+                        content_epoch,
+                        fps_n,
+                        fps_d,
+                        frame_buffer,
+                        running,
+                        stats,
+                        epoch,
+                    );
+                }
+            })?;
+
+        Ok(Self {
+            running,
+            stats,
+            audio,
+            animate,
+            content_epoch,
+            sender: None,
+            hx: Some(sender),
+            discovery: None,
+            source_name: config.name,
             fps_n,
             fps_d,
             frame_buffer_frames,
@@ -247,6 +351,11 @@ impl SendSession {
     /// Snapshot of send statistics.
     pub fn stats(&self) -> SendStats {
         self.stats.lock().clone()
+    }
+
+    /// Address a receiver connects to (`HOST (name)`); `None` for a Full sender.
+    pub fn address(&self) -> Option<String> {
+        self.hx.as_ref().map(|sender| sender.address())
     }
 
     /// Hot-update tone parameters without tearing down the sender.
@@ -306,6 +415,7 @@ impl SendSession {
             let _ = discovery.deregister(&self.source_name);
         }
         drop(self.sender.take());
+        drop(self.hx.take());
     }
 }
 
@@ -675,6 +785,191 @@ fn video_loop(
     }
 }
 
+/// HX video pacing: same deadlines as the Full sender, no subscription gate or frame metadata.
+#[allow(clippy::too_many_arguments, unused_assignments)]
+fn hx_video_loop(
+    sender: Arc<omthx::Sender>,
+    cfg: SendSessionConfig,
+    provider: FrameProvider,
+    animate_flag: Arc<AtomicBool>,
+    content_epoch: Arc<AtomicU64>,
+    fps_n: Arc<AtomicI32>,
+    fps_d: Arc<AtomicI32>,
+    frame_buffer_frames: Arc<AtomicU32>,
+    running: Arc<AtomicBool>,
+    stats: Arc<Mutex<SendStats>>,
+    epoch: Instant,
+) {
+    let stride = (cfg.width as usize) * 2;
+    let frame_bytes = stride * cfg.height as usize;
+    let mut cached: Option<(u64, Vec<u8>)> = None;
+    let mut buffer: VecDeque<(u64, Vec<u8>)> = VecDeque::new();
+    let mut frame_idx = 0u64;
+    let mut last_stats = Instant::now();
+    let mut last_frames = 0u64;
+    let mut behind = false;
+    let mut last_content_epoch = content_epoch.load(Ordering::Relaxed);
+    let mut fps_n_now = fps_n.load(Ordering::Relaxed).max(1);
+    let mut fps_d_now = fps_d.load(Ordering::Relaxed).max(1);
+    let mut video_interval = video_interval_ticks(fps_n_now, fps_d_now);
+    let mut target_fps = fps_n_now as f64 / fps_d_now as f64;
+    let mut late_slack = duration_from_omt_ticks(video_interval.max(1) / 2);
+
+    while running.load(Ordering::Relaxed) {
+        let next_fps_n = fps_n.load(Ordering::Relaxed).max(1);
+        let next_fps_d = fps_d.load(Ordering::Relaxed).max(1);
+        if next_fps_n != fps_n_now || next_fps_d != fps_d_now {
+            fps_n_now = next_fps_n;
+            fps_d_now = next_fps_d;
+            video_interval = video_interval_ticks(fps_n_now, fps_d_now);
+            target_fps = fps_n_now as f64 / fps_d_now as f64;
+            late_slack = duration_from_omt_ticks(video_interval.max(1) / 2);
+            frame_idx = frames_elapsed(epoch.elapsed(), video_interval);
+            buffer.clear();
+        }
+
+        let buffer_depth =
+            clamp_video_frame_buffer_frames(frame_buffer_frames.load(Ordering::Relaxed));
+        let epoch_n = content_epoch.load(Ordering::Relaxed);
+        if epoch_n != last_content_epoch {
+            cached = None;
+            buffer.clear();
+            last_content_epoch = epoch_n;
+        }
+
+        let animate = animate_flag.load(Ordering::Relaxed);
+        let warmup = if buffer.is_empty() { 1 } else { buffer.len() };
+        if !fill_video_buffer(
+            &mut buffer,
+            frame_idx,
+            &provider,
+            animate,
+            epoch_n,
+            &mut cached,
+            frame_bytes,
+            warmup,
+        ) {
+            thread::sleep(Duration::from_millis(5));
+            continue;
+        }
+
+        let deadline = frame_deadline(epoch, frame_idx, video_interval);
+        let now = Instant::now();
+        if now < deadline {
+            sleep_until_deadline(deadline, running.as_ref());
+            if !running.load(Ordering::Relaxed) {
+                break;
+            }
+            behind = false;
+        } else {
+            let late_by = now.saturating_duration_since(deadline);
+            let ideal = frames_elapsed(epoch.elapsed(), video_interval);
+            if ideal > frame_idx {
+                rebase_buffer_indices(&mut buffer, ideal);
+                frame_idx = ideal;
+                behind = true;
+            } else {
+                behind = late_by > late_slack;
+            }
+        }
+
+        let Some((_idx, uyvy)) = buffer.pop_front() else {
+            behind = true;
+            continue;
+        };
+        let timestamp = (frame_idx as i64).saturating_mul(video_interval);
+        let format = omthx::VideoFormat {
+            width: cfg.width.max(0) as u32,
+            height: cfg.height.max(0) as u32,
+            fps_n: fps_n_now as u32,
+            fps_d: fps_d_now as u32,
+            alpha: false,
+        };
+        let _ = sender.send_uyvy(&format, &uyvy, stride, timestamp);
+        frame_idx = frame_idx.saturating_add(1);
+        let _ = fill_video_buffer(
+            &mut buffer,
+            frame_idx,
+            &provider,
+            animate,
+            epoch_n,
+            &mut cached,
+            frame_bytes,
+            buffer_depth,
+        );
+
+        if last_stats.elapsed() >= STATS_INTERVAL {
+            let counters = sender.stats();
+            let window = last_stats.elapsed().as_secs_f64().max(0.001);
+            let frames = counters.frames_sent - last_frames;
+            let mut snap = stats.lock();
+            snap.video_fps = (frames as f64 / window) as f32;
+            snap.encode_ms = counters.encode_ms as f32;
+            snap.frames = counters.frames_sent as i64;
+            snap.dropped = counters.frames_dropped as i64;
+            snap.behind = behind || snap.video_fps + 0.5 < target_fps as f32;
+            snap.connections = counters.connections.max(0) as u32;
+            snap.clients = snap.connections.div_ceil(2);
+            // HX sends audio to every receiver, so both subscriptions follow the client count.
+            snap.video_subscribers = snap.clients;
+            snap.audio_subscribers = snap.clients;
+            snap.bytes_sent = counters.bytes_sent as i64;
+            last_frames = counters.frames_sent;
+            last_stats = Instant::now();
+        }
+    }
+}
+
+/// HX tone thread: same pacing and generator as the Full sender, no subscription gate.
+fn hx_audio_loop(
+    sender: Arc<omthx::Sender>,
+    cfg: Arc<Mutex<AudioToneConfig>>,
+    running: Arc<AtomicBool>,
+    epoch: Instant,
+) {
+    let mut audio_buf = Vec::new();
+    let mut phase = 0.0f64;
+    let mut samples_sent = 0i64;
+
+    while running.load(Ordering::Relaxed) {
+        let snap = cfg.lock().clone();
+        let samples = snap.samples.max(1) as i64;
+        let rate = snap.sample_rate.max(1) as i64;
+        let due = Duration::from_secs_f64(samples_sent as f64 / rate as f64);
+        let now = epoch.elapsed();
+        if due > now {
+            thread::sleep(due - now);
+            continue;
+        } else if now > due + Duration::from_millis(50) {
+            samples_sent = (now.as_secs_f64() * rate as f64).round() as i64;
+            samples_sent -= samples_sent % samples;
+        }
+        audio_buf.clear();
+        if snap.tone_hz > 0.0 {
+            append_sine_planar(
+                &mut audio_buf,
+                snap.channels,
+                samples as i32,
+                snap.sample_rate,
+                snap.tone_hz,
+                snap.level_dbfs,
+                &mut phase,
+            );
+        } else {
+            let ch = snap.channels.max(1) as usize;
+            let n = samples.max(0) as usize;
+            audio_buf.resize(ch * n * 4, 0);
+        }
+        // append_sine_planar writes native f32 bytes; the C API wants the same samples as float.
+        let planar = unsafe {
+            std::slice::from_raw_parts(audio_buf.as_ptr() as *const f32, audio_buf.len() / 4)
+        };
+        let timestamp = samples_sent.saturating_mul(TICKS_PER_SECOND) / rate;
+        samples_sent += samples;
+        let _ = sender.send_audio_planar(planar, snap.sample_rate, snap.channels, timestamp);
+    }
+}
+
 fn append_sine_planar(
     dst: &mut Vec<u8>,
     channels: i32,
@@ -841,5 +1136,37 @@ mod tests {
         let (idx, pixels) = buffer.pop_front().expect("ready frame");
         assert_eq!(idx, 40);
         assert_eq!(pixels, vec![1, 2]);
+    }
+
+    #[test]
+    fn send_config_defaults_to_full_omt() {
+        assert!(SendSessionConfig::default().hx.is_none());
+    }
+
+    #[test]
+    fn hx_send_session_counts_frames() {
+        if !omthx::available() {
+            return; // optional library
+        }
+        let (w, h) = (320i32, 180i32);
+        let frame = Arc::new(vec![128u8; (w * 2 * h) as usize]);
+        let provider: FrameProvider = {
+            let frame = Arc::clone(&frame);
+            Arc::new(move |_| frame.as_ref().clone())
+        };
+        let config = SendSessionConfig {
+            name: "OMT HX omt-media test".into(),
+            width: w,
+            height: h,
+            fps_n: 30,
+            fps_d: 1,
+            hx: Some(HxSendConfig::default()),
+            ..Default::default()
+        };
+        let mut session = SendSession::start(config, provider).expect("start HX session");
+        std::thread::sleep(Duration::from_millis(300));
+        let stats = session.stats();
+        session.stop();
+        assert!(stats.frames > 0, "no frames counted: {stats:?}");
     }
 }

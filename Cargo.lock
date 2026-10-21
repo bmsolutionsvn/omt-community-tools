@@ -5169,7 +5169,7 @@ dependencies = [
 
 [[package]]
 name = "monitor-bench"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -6063,7 +6063,7 @@ dependencies = [
 
 [[package]]
 name = "omt-config-manager"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -6074,7 +6074,7 @@ dependencies = [
 
 [[package]]
 name = "omt-discovery-server"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
@@ -6087,7 +6087,7 @@ dependencies = [
 
 [[package]]
 name = "omt-launcher"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "serde",
  "serde_json",
@@ -6102,10 +6102,11 @@ dependencies = [
 
 [[package]]
 name = "omt-media"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "cpal",
+ "omthx",
  "openmediatransport",
  "parking_lot",
  "suite-core",
@@ -6118,7 +6119,7 @@ dependencies = [
 
 [[package]]
 name = "omt-studio-monitor"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "arc-swap",
@@ -6126,25 +6127,35 @@ dependencies = [
  "eframe",
  "egui",
  "omt-media",
+ "omthx",
  "parking_lot",
  "suite-core",
 ]
 
 [[package]]
 name = "omt-test-patterns"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "clap",
  "gpui",
  "image",
  "omt-media",
+ "omthx",
  "openmediatransport",
  "parking_lot",
  "pattern-generator",
  "rfd",
  "smallvec",
  "suite-core",
+]
+
+[[package]]
+name = "omthx"
+version = "0.1.6"
+dependencies = [
+ "libloading 0.8.9",
+ "thiserror 2.0.20",
 ]
 
 [[package]]
@@ -6372,7 +6383,7 @@ dependencies = [
 
 [[package]]
 name = "pattern-generator"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "image",
  "omt-media",
@@ -8446,7 +8457,7 @@ checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
 
 [[package]]
 name = "suite-core"
-version = "0.1.5"
+version = "0.1.6"
 dependencies = [
  "anyhow",
  "directories",

@@ -106,6 +106,12 @@ struct MonitorApp {
     selected: Option<String>,
     /// Discovery-time IPs for the current selection (used on connect / reapply).
     selected_addresses: Vec<String>,
+    /// Discovered instance name of the selection, used to probe Full or HX.
+    selected_name: Option<String>,
+    /// Mode of the connected source.
+    source_mode: Option<omthx::Mode>,
+    /// HX decoder in use.
+    decoder: Option<String>,
     status: String,
     frame_w: u32,
     frame_h: u32,
@@ -197,7 +203,9 @@ impl MonitorApp {
             let (quality, preview) = settings.quality.to_connect_parts();
             worker.connect_with(ConnectOptions {
                 url: url.clone(),
+                address: None,
                 addresses: Vec::new(),
+                mode: None,
                 quality,
                 preview,
                 video_decode: settings.video_decode,
@@ -232,6 +240,9 @@ impl MonitorApp {
             discovered: Vec::new(),
             selected: initial_url,
             selected_addresses: Vec::new(),
+            selected_name: None,
+            source_mode: None,
+            decoder: None,
             status: String::new(),
             frame_w: 0,
             frame_h: 0,
@@ -638,6 +649,8 @@ impl MonitorApp {
             self.audio_buffer_delay_ms = audio_buffer_delay_ms;
             self.session_state = session_state;
             self.active_video_decode = video_decode;
+            self.source_mode = *self.worker.latest().source_mode.lock();
+            self.decoder = self.worker.latest().decoder.lock().clone();
             if self.settings.buffer.linked {
                 let (fps_n, fps_d) = self.buffer_fps();
                 let before = self.settings.buffer;
@@ -717,7 +730,7 @@ impl MonitorApp {
         }
     }
 
-    fn connect_url(&mut self, url: String, addresses: Vec<String>) {
+    fn connect_url(&mut self, url: String, address: Option<String>, addresses: Vec<String>) {
         let (quality, preview) = self.settings.quality.to_connect_parts();
         *self.prep_ctrl.selected_url.lock() = Some(url.clone());
         // Drop any prepared image from the previous source immediately.
@@ -725,7 +738,9 @@ impl MonitorApp {
         self.prep_ctrl.notify();
         self.worker.connect_with(ConnectOptions {
             url,
+            address,
             addresses,
+            mode: None,
             quality,
             preview,
             video_decode: self.settings.video_decode,
@@ -734,7 +749,10 @@ impl MonitorApp {
 
     fn disconnect_source(&mut self) {
         self.selected = None;
+        self.selected_name = None;
         self.selected_addresses.clear();
+        self.source_mode = None;
+        self.decoder = None;
         *self.prep_ctrl.selected_url.lock() = None;
         self.prep_ctrl.slot.store(None);
         self.prep_ctrl.notify();
@@ -746,10 +764,11 @@ impl MonitorApp {
         self.status = t(self.language, "monitor.none").to_string();
     }
 
-    fn select(&mut self, url: String, addresses: Vec<String>) {
+    fn select(&mut self, url: String, name: String, addresses: Vec<String>) {
         self.selected = Some(url.clone());
+        self.selected_name = Some(name.clone());
         self.selected_addresses = addresses.clone();
-        self.connect_url(url, addresses);
+        self.connect_url(url, Some(name), addresses);
         self.frames_presented = 0;
         self.frames_render_skipped = 0;
         self.frame_w = 0;
@@ -778,7 +797,7 @@ impl MonitorApp {
 
     fn reapply_connection(&mut self) {
         if let Some(url) = self.selected.clone() {
-            self.connect_url(url, self.selected_addresses.clone());
+            self.connect_url(url, self.selected_name.clone(), self.selected_addresses.clone());
         }
     }
 

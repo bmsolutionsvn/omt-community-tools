@@ -14,16 +14,33 @@ use gpui::{
     rgb, size,
 };
 use omt_media::{
-    AudioToneConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES, MIN_VIDEO_FRAME_BUFFER_FRAMES, SendSession,
-    SendSessionConfig, SendStats, clamp_video_frame_buffer_frames, uniquify_local_source_name,
+    AudioToneConfig, HxSendConfig, MAX_VIDEO_FRAME_BUFFER_FRAMES, MIN_VIDEO_FRAME_BUFFER_FRAMES,
+    SendSession, SendSessionConfig, SendStats, clamp_video_frame_buffer_frames,
+    uniquify_local_source_name,
 };
 use openmediatransport::{Quality, uyvy_to_rgba};
 use parking_lot::Mutex;
 use pattern_generator::{PatternKind, fill_uyvy, scroll_uyvy, uyvy_from_image_path};
 use suite_core::{
-    Language, TestPatternsConfig, load_test_patterns_config, reveal_in_file_manager,
-    save_test_patterns_config, t,
+    HxCodec, Language, SendMode, TestPatternsConfig, load_test_patterns_config,
+    reveal_in_file_manager, save_test_patterns_config, t,
 };
+
+/// Map the shared LQ/SQ/HQ profile onto the HX encoder's quality.
+fn hx_quality(quality: Quality) -> omthx::Quality {
+    match quality {
+        Quality::Low => omthx::Quality::Low,
+        Quality::High => omthx::Quality::High,
+        Quality::Medium | Quality::Default => omthx::Quality::Medium,
+    }
+}
+
+fn hx_codec(codec: HxCodec) -> omthx::Codec {
+    match codec {
+        HxCodec::Hevc => omthx::Codec::Hevc,
+        HxCodec::H264 => omthx::Codec::H264,
+    }
+}
 
 mod presets;
 mod widgets;
@@ -84,6 +101,8 @@ fn persist_test_patterns_prefs(view: &PatternsView) {
         fps_n: view.frame_rate.n,
         fps_d: view.frame_rate.d,
         quality: quality_to_config(view.quality),
+        send_mode: view.send_mode,
+        hx_codec: view.hx_codec,
         animate: view.animate,
         anim_speed_h_pct: view.anim_speed_h_pct,
         anim_speed_v_pct: view.anim_speed_v_pct,
@@ -128,6 +147,8 @@ struct PatternsView {
     height: i32,
     frame_rate: FrameRate,
     quality: Quality,
+    send_mode: SendMode,
+    hx_codec: HxCodec,
     animate: bool,
     anim_speed_h_pct: i32,
     anim_speed_v_pct: i32,
@@ -204,6 +225,8 @@ impl PatternsView {
                 d: saved_cfg.fps_d,
             },
             quality: quality_from_config(saved_cfg.quality),
+            send_mode: saved_cfg.send_mode,
+            hx_codec: saved_cfg.hx_codec,
             animate: saved_cfg.animate,
             anim_speed_h_pct: saved_cfg.anim_speed_h_pct,
             anim_speed_v_pct: saved_cfg.anim_speed_v_pct,
@@ -698,10 +721,42 @@ impl PatternsView {
             return;
         }
         self.quality = quality;
-        if let Some(session) = self.session.as_ref() {
+        if self.send_mode == SendMode::Hx {
+            // HX quality is fixed when the encoder opens.
+            self.restart_session();
+        } else if let Some(session) = self.session.as_ref() {
             session.set_quality(quality);
         }
         self.persist_images();
+        cx.notify();
+    }
+
+    fn set_send_mode(&mut self, mode: SendMode, cx: &mut Context<Self>) {
+        if self.send_mode == mode {
+            return;
+        }
+        if mode == SendMode::Hx && !omthx::available() {
+            self.error = Some(SharedString::from(
+                "OMT HX needs omthx.dll (Windows) or libomthx.so (Linux)",
+            ));
+            cx.notify();
+            return;
+        }
+        self.send_mode = mode;
+        self.persist_images();
+        self.restart_session();
+        cx.notify();
+    }
+
+    fn set_hx_codec(&mut self, codec: HxCodec, cx: &mut Context<Self>) {
+        if self.hx_codec == codec {
+            return;
+        }
+        self.hx_codec = codec;
+        self.persist_images();
+        if self.send_mode == SendMode::Hx {
+            self.restart_session();
+        }
         cx.notify();
     }
 
@@ -856,6 +911,13 @@ impl PatternsView {
             animate: self.animate,
             frame_buffer_frames: self.frame_buffer_frames,
             audio: self.audio_config(),
+            hx: match self.send_mode {
+                SendMode::Full => None,
+                SendMode::Hx => Some(HxSendConfig {
+                    quality: hx_quality(self.quality),
+                    codec: hx_codec(self.hx_codec),
+                }),
+            },
         };
 
         match SendSession::start(config, provider) {
@@ -933,6 +995,8 @@ impl Render for PatternsView {
         let tone_hz = self.tone_hz;
         let frame_rate = self.frame_rate;
         let quality = self.quality;
+        let send_mode = self.send_mode;
+        let hx_codec = self.hx_codec;
         let open_menu = self.open_menu;
         let custom_menu = self.custom_menu;
         let thumbs = self.thumbs.clone();
@@ -1164,6 +1228,11 @@ impl Render for PatternsView {
                         sending,
                     ))
                     .child(frame_buffer_control(cx, language, frame_buffer_frames))
+                    .child(mode_control(cx, language, send_mode))
+                    .children(
+                        (send_mode == SendMode::Hx)
+                            .then(|| codec_control(cx, language, hx_codec)),
+                    )
                     .child(quality_control(cx, language, quality))
                     .child(level_control(
                         cx,

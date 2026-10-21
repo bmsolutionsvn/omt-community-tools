@@ -309,7 +309,7 @@ impl MonitorApp {
                                         &format!(":{}", s.port),
                                         selected,
                                     ) {
-                                        self.select(s.url.clone(), s.addresses.clone());
+                                        self.select(s.url.clone(), s.name.clone(), s.addresses.clone());
                                     }
                                 }
                             }
@@ -399,6 +399,19 @@ impl MonitorApp {
                                 format!("{:.1}", self.display_fps),
                             );
                             stat_row(ui, chrome, "Source FPS", format!("{source_fps:.2}"));
+                            stat_row(
+                                ui,
+                                chrome,
+                                "Mode",
+                                match self.source_mode {
+                                    Some(omthx::Mode::Hx) => "OMT HX".to_string(),
+                                    Some(omthx::Mode::Full) => "Full OMT".to_string(),
+                                    None => "—".to_string(),
+                                },
+                            );
+                            if let Some(decoder) = &self.decoder {
+                                stat_row(ui, chrome, "Decoder", decoder.clone());
+                            }
                             stat_row(
                                 ui,
                                 chrome,
