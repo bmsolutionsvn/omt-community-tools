@@ -32,6 +32,19 @@ pub struct Sender {
 unsafe impl Send for Sender {}
 unsafe impl Sync for Sender {}
 
+/// Refuse a picture the C layer would read past, so a short slice cannot cause UB.
+fn check_picture(format: &VideoFormat, data: &[u8], stride: usize, bpp: usize) -> Result<(), Error> {
+    let row = (format.width as usize).saturating_mul(bpp);
+    let needed = stride.saturating_mul(format.height as usize);
+    if stride < row || data.len() < needed {
+        return Err(Error::Api(format!(
+            "picture too small: stride {stride} bytes with {} bytes of data, need stride >= {row} and data >= {needed}",
+            data.len()
+        )));
+    }
+    Ok(())
+}
+
 impl Sender {
     /// Create a source. In [`Mode::Full`] the codec is ignored.
     pub fn open(name: &str, mode: Mode, quality: Quality, codec: Codec) -> Result<Self, Error> {
@@ -51,7 +64,10 @@ impl Sender {
         Ok(Self { api, ptr })
     }
 
-    /// Send one tightly packed UYVY picture.
+    /// Send one UYVY picture (top row first).
+    ///
+    /// `uyvy` must hold at least `stride * height` bytes and `stride` at least
+    /// `width * 2`; a shorter buffer is refused with [`Error::Api`].
     pub fn send_uyvy(
         &self,
         format: &VideoFormat,
@@ -59,6 +75,7 @@ impl Sender {
         stride: usize,
         timestamp: i64,
     ) -> Result<(), Error> {
+        check_picture(format, uyvy, stride, 2)?;
         let c = format.to_c();
         let ok = unsafe {
             (self.api.sender_video)(
@@ -79,6 +96,9 @@ impl Sender {
     }
 
     /// Send one BGRA picture (top row first).
+    ///
+    /// `bgra` must hold at least `stride * height` bytes and `stride` at least
+    /// `width * 4`; a shorter buffer is refused with [`Error::Api`].
     pub fn send_bgra(
         &self,
         format: &VideoFormat,
@@ -86,6 +106,7 @@ impl Sender {
         stride: usize,
         timestamp: i64,
     ) -> Result<(), Error> {
+        check_picture(format, bgra, stride, 4)?;
         let c = format.to_c();
         let ok = unsafe {
             (self.api.sender_video)(
@@ -271,5 +292,22 @@ mod tests {
         assert_eq!((video.width, video.height), (width, height));
         assert_eq!(video.bgra.len(), (width * height * 4) as usize);
         assert!(sender.stats().frames_sent > 0);
+    }
+
+    #[test]
+    fn short_picture_is_rejected() {
+        if !available() {
+            return;
+        }
+        // 4x4: BGRA rows are 16 bytes (64 total), UYVY rows 8 bytes (32 total).
+        let format = VideoFormat { width: 4, height: 4, fps_n: 30, fps_d: 1, alpha: false };
+        let sender =
+            Sender::open("OMTHX Short Test", Mode::Hx, Quality::Low, Codec::Hevc).expect("open");
+        let short = |err: Error| err.to_string().contains("picture too small");
+        assert!(short(sender.send_bgra(&format, &[], 16, 0).unwrap_err()));
+        assert!(short(sender.send_bgra(&format, &[0u8; 63], 16, 0).unwrap_err()));
+        assert!(short(sender.send_bgra(&format, &[0u8; 64], 8, 0).unwrap_err()));
+        assert!(short(sender.send_uyvy(&format, &[0u8; 31], 8, 0).unwrap_err()));
+        assert!(short(sender.send_uyvy(&format, &[0u8; 32], 4, 0).unwrap_err()));
     }
 }
