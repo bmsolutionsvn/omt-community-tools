@@ -6,7 +6,11 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod capture;
+#[cfg(windows)]
 mod catalog;
+#[cfg(windows)]
+mod frame;
 
 #[cfg(not(windows))]
 fn main() {
