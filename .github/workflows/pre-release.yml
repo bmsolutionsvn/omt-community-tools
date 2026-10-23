@@ -54,6 +54,29 @@ jobs:
       - name: Build sidecar tools
         run: cargo build --release --target ${{ matrix.rust_target }} -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server
 
+      # Desktop Capture ships as its own folder, not as a launcher sidecar.
+      # The OMT-HX sidecar DLLs are not in this repository, so packaging runs
+      # only when a checkout (or its build\release) is available on the runner:
+      # set the OMTHX_ROOT environment variable or check OMT-HX out next to this
+      # repository. The E2E script stays a local check (spec §8).
+      - name: Build Desktop Capture (Windows)
+        if: runner.os == 'Windows'
+        run: cargo build --release --target ${{ matrix.rust_target }} -p omt-desktop-capture
+
+      - name: Package Desktop Capture (Windows)
+        id: desktop_capture
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = if ($env:OMTHX_ROOT) { $env:OMTHX_ROOT } else { Join-Path $env:GITHUB_WORKSPACE '..\OMT-HX' }
+          if (-not (Test-Path (Join-Path $root 'build\release\omthx.dll'))) {
+            Write-Warning "OMT-HX sidecars not found at $root; skipping the Desktop Capture artifact."
+            "packaged=false" >> $env:GITHUB_OUTPUT
+            exit 0
+          }
+          ./scripts/package-desktop-capture.ps1 -OmthxRoot $root -Target ${{ matrix.rust_target }}
+          "packaged=true" >> $env:GITHUB_OUTPUT
+
       - name: Prepare sidecars (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -133,6 +156,7 @@ jobs:
             - **macOS (Intel)**: `.dmg` for `x86_64-apple-darwin`
             - **Linux x64**: `.deb` or `.AppImage` for `x86_64-unknown-linux-gnu`
             - **Linux Arm64**: `.deb` or `.AppImage` for `aarch64-unknown-linux-gnu`
+            - **Desktop Capture (Windows only)**: `desktop-capture.zip`, extract it and run the exe from that folder
 
             ### Suite contents
             The installer includes the launcher plus sidecar tools:
@@ -147,3 +171,10 @@ jobs:
           prerelease: true
           uploadUpdaterJson: true
           args: ${{ matrix.args }}
+
+      - name: Publish Desktop Capture (Windows)
+        if: runner.os == 'Windows' && steps.desktop_capture.outputs.packaged == 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: gh release upload ${{ github.ref_name }} dist/desktop-capture.zip --clobber
