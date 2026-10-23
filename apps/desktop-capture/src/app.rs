@@ -1,20 +1,25 @@
 //! egui/eframe Desktop Capture application.
 
 use eframe::egui;
+use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig};
 
 use crate::catalog::{self, Entry};
+use crate::runtime::SourceRuntime;
 
 /// A source the user has added to the list.
 struct Source {
     entry: Entry,
     name: String,
+    runtime: Option<SourceRuntime>,
 }
 
-/// Desktop Capture main window. No capturing yet: this just picks sources.
+/// Desktop Capture main window: pick sources, then start and stop them.
 pub struct DesktopCaptureApp {
     monitors: Vec<Entry>,
     windows: Vec<Entry>,
     sources: Vec<Source>,
+    quality: DesktopQuality,
+    codec: DesktopCodec,
     status: String,
 }
 
@@ -24,6 +29,8 @@ impl Default for DesktopCaptureApp {
             monitors: Vec::new(),
             windows: Vec::new(),
             sources: Vec::new(),
+            quality: DesktopQuality::default(),
+            codec: DesktopCodec::default(),
             status: String::new(),
         };
         app.refresh();
@@ -56,7 +63,11 @@ impl DesktopCaptureApp {
     fn add_source(&mut self, entry: Entry) {
         let taken: Vec<String> = self.sources.iter().map(|s| s.name.clone()).collect();
         let name = catalog::unique_name(&catalog::default_name(&entry), &taken);
-        self.sources.push(Source { entry, name });
+        self.sources.push(Source {
+            entry,
+            name,
+            runtime: None,
+        });
     }
 }
 
@@ -107,11 +118,43 @@ impl eframe::App for DesktopCaptureApp {
                 ui.weak("No sources yet. Use Add source ▾ to pick a screen or an application.");
                 return;
             }
-            for source in &self.sources {
+            let (quality, codec) = (self.quality, self.codec);
+            let mut error = None;
+            for source in &mut self.sources {
+                let mut start = false;
+                let mut stop = false;
                 ui.horizontal(|ui| {
                     ui.label(&source.name);
                     ui.weak(&source.entry.detail);
+                    match source.runtime.as_ref() {
+                        Some(runtime) => {
+                            let stats = runtime.stats();
+                            ui.weak(stats.state.to_string());
+                            ui.weak(format!(
+                                "{:.0} fps · {:.2} Mbps · {} conn · {:.1} ms",
+                                stats.fps, stats.mbps, stats.connections, stats.encode_ms
+                            ));
+                            stop = ui.button("Stop").clicked();
+                        }
+                        None => start = ui.button("Start").clicked(),
+                    }
                 });
+                if start {
+                    let cfg = DesktopSourceConfig {
+                        id: source.entry.id.clone(),
+                        name: source.name.clone(),
+                        ..DesktopSourceConfig::default()
+                    };
+                    match SourceRuntime::start(&cfg, &source.entry, quality, codec) {
+                        Ok(runtime) => source.runtime = Some(runtime),
+                        Err(err) => error = Some(err.to_string()),
+                    }
+                } else if stop && let Some(mut runtime) = source.runtime.take() {
+                    runtime.stop();
+                }
+            }
+            if let Some(error) = error {
+                self.status = error;
             }
         });
     }

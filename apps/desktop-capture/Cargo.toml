@@ -27,4 +27,4 @@ tracing-subscriber.workspace = true
 [target.'cfg(windows)'.dependencies]
 windows-capture.workspace = true
 wasapi.workspace = true
-windows = { version = "0.62", features = ["Win32_System_Performance"] }
+windows = { version = "0.61", features = ["Win32_System_Performance"] }

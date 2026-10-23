@@ -6088,7 +6088,7 @@ dependencies = [
  "tracing",
  "tracing-subscriber",
  "wasapi",
- "windows 0.62.2",
+ "windows 0.61.3",
  "windows-capture",
 ]
 

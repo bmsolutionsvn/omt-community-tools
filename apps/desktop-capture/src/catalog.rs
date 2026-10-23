@@ -1,7 +1,9 @@
 //! Enumerate capturable desktop sources.
 
 use suite_core::DesktopSourceId;
+use windows_capture::WindowsCaptureGraphicsCaptureItem;
 use windows_capture::monitor::Monitor;
+use windows_capture::settings::{CaptureItemTypes, TryIntoCaptureItemWithType};
 use windows_capture::window::Window;
 
 /// One selectable desktop source.
@@ -24,10 +26,52 @@ pub enum CatalogError {
     /// Window enumeration failed.
     #[error("failed to enumerate windows: {0}")]
     Windows(#[from] windows_capture::window::Error),
+    /// The saved source is not on screen any more.
+    #[error("source not found: {0}")]
+    NotFound(String),
 }
 
 /// Longest default source name before a ` (2)` uniqueness suffix is added.
 const NAME_MAX_CHARS: usize = 64;
+
+/// One capturable thing, as the capture API wants it.
+#[derive(Debug, Clone, Copy)]
+pub enum CaptureItem {
+    /// A whole monitor.
+    Monitor(Monitor),
+    /// A single window.
+    Window(Window),
+}
+
+impl TryIntoCaptureItemWithType for CaptureItem {
+    fn try_into_capture_item(
+        self,
+    ) -> Result<(WindowsCaptureGraphicsCaptureItem, CaptureItemTypes), windows::core::Error> {
+        match self {
+            Self::Monitor(monitor) => monitor.try_into_capture_item(),
+            Self::Window(window) => window.try_into_capture_item(),
+        }
+    }
+}
+
+/// Re-find the source saved in `entry`.
+pub fn resolve_item(entry: &Entry) -> Result<CaptureItem, CatalogError> {
+    match &entry.id {
+        DesktopSourceId::Monitor { device } => Monitor::enumerate()?
+            .into_iter()
+            .find(|monitor| monitor.device_name().is_ok_and(|name| name == *device))
+            .map(CaptureItem::Monitor)
+            .ok_or_else(|| CatalogError::NotFound(entry.label.clone())),
+        DesktopSourceId::Window { process, title } => Window::enumerate()?
+            .into_iter()
+            .find(|window| {
+                window.title().is_ok_and(|found| found == *title)
+                    && strip_exe(&window.process_name().unwrap_or_default()) == process
+            })
+            .map(CaptureItem::Window)
+            .ok_or_else(|| CatalogError::NotFound(entry.label.clone())),
+    }
+}
 
 /// All monitors, primary first: `Screen 1` is always the primary.
 pub fn monitors() -> Result<Vec<Entry>, CatalogError> {
