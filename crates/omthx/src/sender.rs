@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, CString, c_int, c_void};
 
-use crate::library::{Api, Codec, Error, Mode, Quality, VideoFormat, api, PIXEL_UYVY};
+use crate::library::{Api, Codec, Error, Mode, Quality, VideoFormat, api, PIXEL_BGRA, PIXEL_UYVY};
 
 /// Counter snapshot from `omthx::SenderStats`.
 #[repr(C)]
@@ -66,6 +66,33 @@ impl Sender {
                 &c,
                 PIXEL_UYVY,
                 uyvy.as_ptr(),
+                stride as c_int,
+                0,
+                timestamp,
+            )
+        };
+        if ok == 1 {
+            Ok(())
+        } else {
+            Err(Error::Api(self.api.error_message()))
+        }
+    }
+
+    /// Send one BGRA picture (top row first).
+    pub fn send_bgra(
+        &self,
+        format: &VideoFormat,
+        bgra: &[u8],
+        stride: usize,
+        timestamp: i64,
+    ) -> Result<(), Error> {
+        let c = format.to_c();
+        let ok = unsafe {
+            (self.api.sender_video)(
+                self.ptr,
+                &c,
+                PIXEL_BGRA,
+                bgra.as_ptr(),
                 stride as c_int,
                 0,
                 timestamp,
@@ -197,6 +224,51 @@ mod tests {
         let video = video.expect("no decoded frame");
         assert_eq!(video.width, width);
         assert_eq!(video.height, height);
+        assert_eq!(video.bgra.len(), (width * height * 4) as usize);
+        assert!(sender.stats().frames_sent > 0);
+    }
+
+    #[test]
+    fn hx_loopback_bgra() {
+        if !available() {
+            return;
+        }
+        let (width, height) = (320u32, 180u32);
+        let format = VideoFormat { width, height, fps_n: 30, fps_d: 1, alpha: false };
+        let sender =
+            Sender::open("OMTHX BGRA Test", Mode::Hx, Quality::Medium, Codec::Hevc).expect("open");
+        let address = sender.address();
+        let mut bgra = vec![0u8; (width * 4 * height) as usize];
+        for px in bgra.chunks_exact_mut(4) {
+            px[0] = 0;
+            px[1] = 0;
+            px[2] = 200; // red in BGRA
+            px[3] = 255;
+        }
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let sender = std::sync::Arc::new(sender);
+        let writer = {
+            let sender = std::sync::Arc::clone(&sender);
+            let running = std::sync::Arc::clone(&running);
+            thread::spawn(move || {
+                let mut ts = 0i64;
+                while running.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = sender.send_bgra(&format, &bgra, (width * 4) as usize, ts);
+                    ts += 333_333;
+                    thread::sleep(Duration::from_millis(10));
+                }
+            })
+        };
+        let mut receiver = crate::Receiver::open(&address).expect("open receiver");
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        let mut video = None;
+        while video.is_none() && std::time::Instant::now() < deadline {
+            video = receiver.recv_video(Duration::from_millis(100));
+        }
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = writer.join();
+        let video = video.expect("no decoded frame");
+        assert_eq!((video.width, video.height), (width, height));
         assert_eq!(video.bgra.len(), (width * height * 4) as usize);
         assert!(sender.stats().frames_sent > 0);
     }

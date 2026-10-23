@@ -144,6 +144,7 @@ pub(crate) struct CVideoFormat {
     pub alpha: c_int,
 }
 
+pub(crate) const PIXEL_BGRA: c_int = 0;
 pub(crate) const PIXEL_UYVY: c_int = 1;
 
 /// The loaded function table. Lives for the process lifetime.
