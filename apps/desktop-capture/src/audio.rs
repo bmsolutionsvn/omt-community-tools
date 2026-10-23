@@ -6,7 +6,6 @@ use std::sync::mpsc;
 use std::thread::{self, JoinHandle};
 use std::time::Duration;
 
-use omthx::Sender;
 use parking_lot::Mutex;
 use wasapi::{
     AudioCaptureClient, AudioClient, DeviceEnumerator, Direction, SampleType, StreamMode,
@@ -14,6 +13,7 @@ use wasapi::{
 };
 
 use crate::clock;
+use crate::runtime::SharedSender;
 
 /// 100 ns ticks per second, OMT's timestamp unit.
 const TICKS_PER_SEC: i64 = 10_000_000;
@@ -126,7 +126,7 @@ impl AudioRuntime {
     ///
     /// `None` and `Some("")` mean no endpoint is selected: audio does not start and
     /// [`AudioError::Unsupported`] lets the source keep sending video without it.
-    pub fn start(device_id: Option<&str>, sender: Arc<Sender>) -> Result<Self, AudioError> {
+    pub fn start(device_id: Option<&str>, sender: Arc<SharedSender>) -> Result<Self, AudioError> {
         let device_id = selected_device(device_id)?.to_owned();
         let (ready_tx, ready_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
@@ -220,7 +220,11 @@ enum Convert {
 impl Convert {
     fn for_format(format: &WaveFormat) -> Result<Self, AudioError> {
         let store_bits = format.get_bitspersample();
-        let valid_bits = format.get_validbitspersample().clamp(1, store_bits.max(1));
+        // 0 means "same as the container" in WAVEFORMATEXTENSIBLE.
+        let valid_bits = match format.get_validbitspersample() {
+            0 => store_bits,
+            bits => bits.min(store_bits),
+        };
         let sub = format.get_subformat();
         match (sub.as_ref().ok(), store_bits) {
             (Some(SampleType::Float), 32) => Ok(Self::F32),
@@ -305,7 +309,7 @@ fn open_loopback(device_id: &str) -> Result<Opened, String> {
 
 fn capture_thread(
     device_id: String,
-    sender: Arc<Sender>,
+    sender: Arc<SharedSender>,
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
     ready: mpsc::Sender<Result<(), AudioError>>,
@@ -356,7 +360,7 @@ fn capture_thread(
 /// Read packets, coalesce them to ~10 ms, and send planar f32 until stopped.
 fn capture_loop(
     opened: &Opened,
-    sender: &Sender,
+    sender: &SharedSender,
     stop: &AtomicBool,
     error: &Mutex<Option<String>>,
 ) -> Result<(), String> {
@@ -400,7 +404,8 @@ fn capture_loop(
         }
         if pending.len() / opened.channels >= flush_frames {
             let planar = to_planar_f32(&pending, opened.channels);
-            if let Err(err) = sender.send_audio_planar(
+            // Read per packet so a reopened sender is picked up.
+            if let Err(err) = sender.current().send_audio_planar(
                 &planar,
                 opened.rate as i32,
                 opened.channels as i32,
@@ -479,6 +484,23 @@ fn converts_24_in_32_through_the_format() {
     let format = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, None);
     let convert = Convert::for_format(&format).expect("PCM 24-in-32");
     let half = 1i32 << 30; // 24 valid bits, left aligned: 0.5 after >> 8 and scaling.
+    let bytes: Vec<u8> = [half, -half]
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    let out = convert.convert(&bytes);
+    assert_eq!(out.len(), 2);
+    assert!((out[0] - 0.5).abs() < 1e-6);
+    assert!((out[1] + 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn zero_valid_bits_mean_the_container_width() {
+    // WAVEFORMATEXTENSIBLE uses 0 for "same as the container"; clamping it to 1
+    // would shift every sample out and leave silence.
+    let format = WaveFormat::new(32, 0, &SampleType::Int, 48_000, 2, None);
+    let convert = Convert::for_format(&format).expect("PCM 32");
+    let half = 1i32 << 30;
     let bytes: Vec<u8> = [half, -half]
         .iter()
         .flat_map(|sample| sample.to_le_bytes())

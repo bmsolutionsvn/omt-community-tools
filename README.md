@@ -63,7 +63,8 @@ Studio Monitor and Test Patterns also speak OMT-HX (HEVC/H.264 inside OMT), thro
 3. the normal library search path.
 
 Without it both tools work with Full OMT only, and connecting to an HX source or choosing HX in Test
-Patterns reports that the library is missing. On Windows the library needs its FFmpeg DLLs beside it.
+Patterns reports that the library is missing. On Windows the library needs its FFmpeg DLLs beside it,
+and the Microsoft Visual C++ 2015–2022 x64 runtime (`VCRUNTIME140_1.dll`).
 macOS is Full-only for now.
 
 - Studio Monitor picks Full or HX per source (1.5 s probe); there is no mode setting.

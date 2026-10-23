@@ -17,6 +17,11 @@ launcher installer.
 exe. Copying just the exe elsewhere makes every source fail to start with a
 loader error. There is no installer, no service and no launcher entry.
 
+The Microsoft Visual C++ 2015–2022 **x64** runtime must be installed: `omthx.dll`
+imports `VCRUNTIME140_1.dll`. Current Windows 11 builds usually have it; a clean
+or freshly imaged machine does not, and without it the app opens but every source
+reports the loader error.
+
 Receive the sources with Studio Monitor, BreadStudio, `omthx-recv` or any other
 OMT-HX receiver.
 
@@ -28,8 +33,10 @@ OMT-HX receiver.
 - **Refresh** re-enumerates both lists.
 - A source survives the tool restarting: monitors by device id, windows by
   process name and title. A missing window comes back as an **Offline** row.
-  Pick **Reattach** to choose the window again when the match is ambiguous or
-  gone.
+  **Reattach** opens a picker of live screens or windows, refreshed at that
+  moment, so you can choose the source again when the match is ambiguous or
+  gone; the row takes that source's default name (made unique) and starts from
+  it.
 
 Each row has:
 

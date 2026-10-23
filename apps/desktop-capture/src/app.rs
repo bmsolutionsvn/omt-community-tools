@@ -54,12 +54,29 @@ struct SourceRow {
     error: Option<String>,
 }
 
+/// The open Reattach picker: which row it fills in and which list it shows.
+struct Picker {
+    row: usize,
+    /// The row's saved id when the picker opened; a row removed meanwhile is not reassigned.
+    saved: DesktopSourceId,
+    kind: PickerKind,
+}
+
+/// Which catalog a Reattach picker lists.
+#[derive(Clone, Copy)]
+enum PickerKind {
+    Monitors,
+    Windows,
+}
+
 /// Desktop Capture main window: pick sources, then start and stop them.
 pub struct DesktopCaptureApp {
     catalog: Catalog,
     rows: Vec<SourceRow>,
     /// Footer settings; each row keeps its own.
     config: DesktopCaptureConfig,
+    /// The Reattach picker, while one is open.
+    picker: Option<Picker>,
     /// Minimise once, on the first frame.
     minimise: bool,
     /// Why the saved settings could not be read at startup, shown in the toolbar.
@@ -94,6 +111,7 @@ impl DesktopCaptureApp {
             rows,
             minimise: config.minimise_on_start,
             config,
+            picker: None,
             startup_warning: None,
             save_error: None,
         };
@@ -153,16 +171,96 @@ impl DesktopCaptureApp {
         });
     }
 
-    /// Look for the row's saved source again, after the user reopened it.
-    fn reattach(&mut self, index: usize) {
-        self.catalog = Catalog::enumerate();
-        let Some(id) = self.rows.get(index).map(|row| row.cfg.id.clone()) else {
+    /// Open the picker for the row's kind, after re-enumerating what is on screen.
+    fn open_reattach(&mut self, index: usize) {
+        let Some(kind) = self.rows.get(index).map(|row| match row.cfg.id {
+            DesktopSourceId::Monitor { .. } => PickerKind::Monitors,
+            DesktopSourceId::Window { .. } => PickerKind::Windows,
+        }) else {
             return;
         };
-        let entry = resolve(&self.catalog, &id);
-        if let Some(row) = self.rows.get_mut(index) {
-            row.entry = entry;
-            row.error = None;
+        // Re-enumerated on demand: the window that closed may be open again now.
+        self.catalog = Catalog::enumerate();
+        let saved = self.rows[index].cfg.id.clone();
+        self.picker = Some(Picker {
+            row: index,
+            saved,
+            kind,
+        });
+    }
+
+    /// Point the row at `entry`, rename it to that source's default name and clear
+    /// its error. The caller marks the settings dirty.
+    fn reassign(&mut self, index: usize, entry: Entry) {
+        let taken: Vec<String> = self
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(other, _)| *other != index)
+            .map(|(_, row)| row.cfg.name.clone())
+            .collect();
+        let Some(row) = self.rows.get_mut(index) else {
+            return;
+        };
+        if let Some(mut runtime) = row.runtime.take() {
+            runtime.stop();
+        }
+        let name = catalog::unique_name(&catalog::default_name(&entry), &taken);
+        row.cfg.id = entry.id.clone();
+        row.cfg.name = name;
+        row.entry = Some(entry);
+        row.error = None;
+    }
+
+    /// Draw the Reattach picker, if one is open; returns whether a source was chosen.
+    fn show_picker(&mut self, ctx: &egui::Context) -> bool {
+        let Some(picker) = self.picker.take() else {
+            return false;
+        };
+        let (entries, empty) = match picker.kind {
+            PickerKind::Monitors => (&self.catalog.monitors, "No screens found"),
+            PickerKind::Windows => (&self.catalog.windows, "No windows found"),
+        };
+        let mut chosen = None;
+        let mut open = true;
+        egui::Window::new("Reattach")
+            .collapsible(false)
+            .resizable(false)
+            .open(&mut open)
+            .show(ctx, |ui| {
+                ui.weak("Choose the source this row should send.");
+                if entries.is_empty() {
+                    ui.weak(empty);
+                }
+                egui::ScrollArea::vertical()
+                    .max_height(320.0)
+                    .show(ui, |ui| {
+                        for entry in entries {
+                            let text = format!("{}  {}", entry.label, entry.detail);
+                            if ui.button(text).clicked() {
+                                chosen = Some(entry.clone());
+                            }
+                        }
+                    });
+            });
+        match chosen {
+            Some(entry) => {
+                if self
+                    .rows
+                    .get(picker.row)
+                    .is_some_and(|row| row.cfg.id == picker.saved)
+                {
+                    self.reassign(picker.row, entry);
+                    return true;
+                }
+                false
+            }
+            None => {
+                if open {
+                    self.picker = Some(picker);
+                }
+                false
+            }
         }
     }
 
@@ -427,6 +525,10 @@ impl eframe::App for DesktopCaptureApp {
                     (None, None) => ("Offline", ui.visuals().error_fg_color),
                     (None, Some(_)) => ("Idle", ui.visuals().weak_text_color()),
                 };
+                let offline = match (&stats, &row.entry) {
+                    (Some(stats), _) => matches!(stats.state, SourceState::Offline(_)),
+                    (None, entry) => entry.is_none(),
+                };
                 ui.horizontal(|ui| {
                     if ui.checkbox(&mut row.cfg.enabled, "On").changed() {
                         changed = true;
@@ -471,15 +573,20 @@ impl eframe::App for DesktopCaptureApp {
                                 start = Some(index);
                             }
                         }
-                        (None, None) => {
-                            if ui.button("Reattach").clicked() {
-                                reattach = Some(index);
-                            }
-                        }
+                        (None, None) => {}
+                    }
+                    // An Offline row can always be pointed at another source, with or
+                    // without an old entry (D15).
+                    if offline && ui.button("Reattach").clicked() {
+                        reattach = Some(index);
                     }
                 });
                 if let Some(error) = &row.error {
                     ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                }
+                if let Some(SourceState::Offline(reason)) = stats.as_ref().map(|stats| &stats.state)
+                {
+                    ui.colored_label(ui.visuals().error_fg_color, reason.as_str());
                 }
                 if let Some(error) = stats
                     .as_ref()
@@ -570,10 +677,13 @@ impl eframe::App for DesktopCaptureApp {
             self.stop(index);
         }
         if let Some(index) = reattach {
-            self.reattach(index);
+            self.open_reattach(index);
         }
         if let Some(index) = remove {
             self.remove(index);
+            changed = true;
+        }
+        if self.show_picker(ui.ctx()) {
             changed = true;
         }
         if changed {
@@ -703,6 +813,50 @@ mod tests {
         ));
         assert!(app.rows[2].entry.is_none());
         assert_eq!(app.rows[2].cfg.audio_device, None);
+    }
+
+    #[test]
+    fn reattaching_writes_the_chosen_source_and_a_unique_name() {
+        let saved = DesktopCaptureConfig {
+            sources: vec![
+                DesktopSourceConfig {
+                    id: DesktopSourceId::Window {
+                        process: "gone".into(),
+                        title: "Gone".into(),
+                    },
+                    name: "Gone — Gone".into(),
+                    ..Default::default()
+                },
+                DesktopSourceConfig {
+                    id: DesktopSourceId::Window {
+                        process: "chrome".into(),
+                        title: "Inbox".into(),
+                    },
+                    name: "chrome — Inbox".into(),
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let mut app = DesktopCaptureApp::new(saved, Catalog::default());
+        assert!(app.rows[0].entry.is_none());
+        app.rows[0].error = Some("window not attached: Gone — Gone is gone".into());
+
+        let entry = Entry {
+            id: DesktopSourceId::Window {
+                process: "chrome".into(),
+                title: "Inbox".into(),
+            },
+            label: "Inbox".into(),
+            detail: "chrome".into(),
+        };
+        app.reassign(0, entry.clone());
+
+        assert_eq!(app.rows[0].cfg.id, entry.id);
+        // The default name is taken by the other row, so it gains a suffix.
+        assert_eq!(app.rows[0].cfg.name, "chrome — Inbox (2)");
+        assert!(app.rows[0].entry.is_some());
+        assert!(app.rows[0].error.is_none());
     }
 
     fn monitor_id() -> DesktopSourceId {

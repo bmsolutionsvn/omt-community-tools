@@ -171,12 +171,13 @@ pub fn monitors() -> Result<Vec<Entry>, CatalogError> {
     let mut found = Monitor::enumerate()?;
     found.sort_by_key(|monitor| Some(*monitor) != primary);
     let mut entries = Vec::with_capacity(found.len());
-    for (index, monitor) in found.into_iter().enumerate() {
+    for monitor in found.into_iter() {
         // A monitor without a device name cannot be saved and reattached.
         let Ok(device) = monitor.device_name() else {
             continue;
         };
-        let mut label = format!("Screen {}", index + 1);
+        // Numbered after filtering, so a skipped monitor never shifts the rest.
+        let mut label = format!("Screen {}", entries.len() + 1);
         if primary == Some(monitor) {
             label.push_str(" (Primary)");
         }
@@ -207,10 +208,10 @@ fn window_pairs(self_pid: u32) -> Result<Vec<(Entry, Window)>, CatalogError> {
     for window in Window::enumerate()? {
         let pid = window.process_id().unwrap_or(0);
         let title = window.title().unwrap_or_default();
-        if !is_capturable(&title, window.is_valid(), pid, self_pid) {
+        let process = strip_exe(&window.process_name().unwrap_or_default()).to_string();
+        if !is_capturable(&process, &title, window.is_valid(), pid, self_pid) {
             continue;
         }
-        let process = strip_exe(&window.process_name().unwrap_or_default()).to_string();
         pairs.push((
             Entry {
                 id: DesktopSourceId::Window {
@@ -226,9 +227,10 @@ fn window_pairs(self_pid: u32) -> Result<Vec<(Entry, Window)>, CatalogError> {
     Ok(pairs)
 }
 
-/// Whether a window is worth listing: visible to the capture API, not ours, and titled.
-pub fn is_capturable(title: &str, valid: bool, pid: u32, self_pid: u32) -> bool {
-    valid && pid != self_pid && !title.trim().is_empty()
+/// Whether a window is worth listing: visible to the capture API, not ours, titled,
+/// and from a process we can name (an empty process can never be matched again).
+pub fn is_capturable(process: &str, title: &str, valid: bool, pid: u32, self_pid: u32) -> bool {
+    valid && pid != self_pid && !title.trim().is_empty() && !process.trim().is_empty()
 }
 
 /// `base`, or `base (2)`, `base (3)`, … — the first name not already in `taken`.
@@ -366,11 +368,14 @@ fn reattach_means_its_rules() {
 
 #[test]
 fn filters_windows_we_cannot_capture() {
-    assert!(is_capturable("Notepad", true, 42, 7));
-    assert!(!is_capturable("", true, 42, 7));
-    assert!(!is_capturable("   ", true, 42, 7));
-    assert!(!is_capturable("Notepad", false, 42, 7));
-    assert!(!is_capturable("OMT Desktop Capture", true, 7, 7));
+    assert!(is_capturable("notepad", "Notepad", true, 42, 7));
+    assert!(!is_capturable("notepad", "", true, 42, 7));
+    assert!(!is_capturable("notepad", "   ", true, 42, 7));
+    assert!(!is_capturable("notepad", "Notepad", false, 42, 7));
+    assert!(!is_capturable("notepad", "OMT Desktop Capture", true, 7, 7));
+    // A window whose process name cannot be read could never be matched again.
+    assert!(!is_capturable("", "Notepad", true, 42, 7));
+    assert!(!is_capturable("  ", "Notepad", true, 42, 7));
 }
 
 #[test]

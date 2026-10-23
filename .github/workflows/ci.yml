@@ -50,9 +50,12 @@ jobs:
             libxcb-shape0-dev \
             libxcb-xfixes0-dev
       - name: Clippy (workspace libs/tools)
-        run: cargo clippy -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server --all-targets -- -D warnings
+        run: cargo clippy -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-studio-monitor -p omt-test-patterns -p omt-config-manager -p omt-discovery-server -p omt-desktop-capture --all-targets -- -D warnings
       - name: Test
         run: cargo test -p suite-core -p omt-media -p pattern-generator -p monitor-bench -p omt-config-manager -p omt-discovery-server
+      - name: Test desktop capture (Windows)
+        if: runner.os == 'Windows'
+        run: cargo test -p omt-desktop-capture
 
   build-tools:
     strategy:

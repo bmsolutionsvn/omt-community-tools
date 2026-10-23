@@ -5,8 +5,8 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::thread::{self, JoinHandle};
 use std::time::{Duration, Instant};
 
-use omthx::{Codec, Mode, Quality, Sender, SenderStats, VideoFormat};
-use parking_lot::Mutex;
+use omthx::{Codec, Mode, Quality, Sender, VideoFormat};
+use parking_lot::{Mutex, RwLock};
 use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig, DesktopSourceId};
 use windows_capture::capture::{
     CaptureControl, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
@@ -103,27 +103,65 @@ pub struct FramePump {
 }
 
 impl FramePump {
-    /// Newest captured frame, or the previous one re-stamped with `now_ticks`.
-    pub fn next(&mut self, sink: &LatestFrame, now_ticks: i64) -> Option<FrameData> {
+    /// Newest captured frame, or the previous one with the timestamp to send it under.
+    pub fn next(&mut self, sink: &LatestFrame, now_ticks: i64) -> Option<(Arc<FrameData>, i64)> {
         let fresh = if let Some(frame) = sink.take_latest() {
             self.last = Some(frame);
             true
         } else {
             false
         };
-        let last = self.last.as_ref()?;
-        Some(FrameData {
-            timestamp: if fresh { last.timestamp } else { now_ticks },
-            ..(**last).clone()
-        })
+        let last = Arc::clone(self.last.as_ref()?);
+        let timestamp = if fresh { last.timestamp } else { now_ticks };
+        Some((last, timestamp))
     }
 }
 
-/// One running source: the sender, its capture, and the stats the UI reads.
+/// Consecutive send failures before the row goes Offline.
+const MAX_SEND_FAILURES: u32 = 3;
+
+/// The sender, shared by the video and audio threads.
 ///
-/// The sender is shared so an audio task can send on the same source.
+/// A reopen after a rejected size change replaces the sender in place, so both
+/// threads switch to the new one; neither the runtime nor the UI keeps a clone,
+/// so the OMT source closes as soon as the workers exit.
+pub(crate) struct SharedSender {
+    inner: RwLock<Arc<Sender>>,
+}
+
+impl SharedSender {
+    fn new(sender: Sender) -> Self {
+        Self {
+            inner: RwLock::new(Arc::new(sender)),
+        }
+    }
+
+    /// The sender to send with; audio re-reads it per packet so it follows a reopen.
+    pub(crate) fn current(&self) -> Arc<Sender> {
+        Arc::clone(&self.inner.read())
+    }
+
+    fn replace(&self, sender: Sender) {
+        *self.inner.write() = Arc::new(sender);
+    }
+}
+
+/// What the sender thread needs to reopen the sender after a size change.
+struct SendSetup {
+    name: String,
+    quality: Quality,
+    codec: Codec,
+    fps_n: u32,
+    fps_d: u32,
+    interval: Duration,
+    closed_reason: &'static str,
+}
+
+/// One running source: its capture, workers, and the stats the UI reads.
+///
+/// Neither worker's sender is kept here: the address string is all the UI needs.
 pub struct SourceRuntime {
-    sender: Arc<Sender>,
+    address: String,
     capture: Mutex<Option<CaptureControl<CaptureHandler, CaptureError>>>,
     audio: Option<AudioRuntime>,
     flags: Arc<CaptureFlags>,
@@ -144,12 +182,9 @@ impl SourceRuntime {
         if !omthx::available() {
             return Err(RuntimeError::LibraryMissing);
         }
-        let sender = Arc::new(Sender::open(
-            &cfg.name,
-            Mode::Hx,
-            hx_quality(quality),
-            hx_codec(codec),
-        )?);
+        let sender = Sender::open(&cfg.name, Mode::Hx, hx_quality(quality), hx_codec(codec))?;
+        let address = sender.address();
+        let sender = Arc::new(SharedSender::new(sender));
         let item = catalog::resolve_item(entry)?;
 
         let fps_n = cfg.fps_n.max(1);
@@ -192,19 +227,16 @@ impl SourceRuntime {
             let flags = Arc::clone(&flags);
             let stats = Arc::clone(&stats);
             let stop = Arc::clone(&stop);
-            move || {
-                send_loop(
-                    sender,
-                    sink,
-                    flags,
-                    stats,
-                    stop,
-                    closed_reason,
-                    fps_n,
-                    fps_d,
-                    interval,
-                )
-            }
+            let setup = SendSetup {
+                name: cfg.name.clone(),
+                quality: hx_quality(quality),
+                codec: hx_codec(codec),
+                fps_n,
+                fps_d,
+                interval,
+                closed_reason,
+            };
+            move || send_loop(sender, sink, flags, stats, stop, setup)
         });
 
         // `Some("")` is how older saved configs spell "no audio", the same as `None`.
@@ -222,7 +254,7 @@ impl SourceRuntime {
         stats.lock().audio_error = audio_error;
 
         Ok(Self {
-            sender,
+            address,
             capture: Mutex::new(Some(capture)),
             audio,
             flags,
@@ -258,10 +290,6 @@ impl SourceRuntime {
                 Ok(()) => "capture ended".to_string(),
                 Err(err) => err.to_string(),
             };
-            self.stop.store(true, Ordering::Relaxed);
-            if let Some(audio) = &self.audio {
-                audio.request_stop();
-            }
             *self.stats.lock() = RowStats {
                 state: SourceState::Offline(reason),
                 audio_error: audio_error.clone(),
@@ -270,12 +298,30 @@ impl SourceRuntime {
         }
         let mut row = self.stats.lock().clone();
         row.audio_error = audio_error;
+        // An Offline row has nothing left to send: stop the workers so the
+        // sender drops and the OMT source closes.
+        if matches!(row.state, SourceState::Offline(_)) {
+            self.stop_workers();
+        }
         row
     }
 
     /// Source address a receiver connects to: `HOSTNAME (name)`.
     pub fn address(&self) -> String {
-        self.sender.address()
+        self.address.clone()
+    }
+
+    /// Stop the workers without taking their handles.
+    fn stop_workers(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+        if let Some(audio) = &self.audio {
+            audio.request_stop();
+        }
+        if let Some(control) = self.capture.lock().take()
+            && let Err(err) = control.stop()
+        {
+            tracing::warn!("stopping capture failed: {err}");
+        }
     }
 
     /// Stop audio, the sender thread and the capture. Safe to call more than once.
@@ -284,8 +330,14 @@ impl SourceRuntime {
             audio.stop();
         }
         self.stop.store(true, Ordering::Relaxed);
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
+        if let Some(thread) = self.thread.take()
+            && let Err(panic) = thread.join()
+        {
+            tracing::error!("sender thread panicked: {panic:?}");
+            *self.stats.lock() = RowStats {
+                state: SourceState::Offline("sender thread panicked".into()),
+                ..RowStats::default()
+            };
         }
         if let Some(control) = self.capture.lock().take()
             && let Err(err) = control.stop()
@@ -304,51 +356,140 @@ impl Drop for SourceRuntime {
     }
 }
 
+/// What the sender thread does after a failed send.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Recovery {
+    /// The frame size changed: reopen the sender under the same name and retry once.
+    Reopen,
+    /// A failure that may be transient; keep sending.
+    Retry,
+    /// Too many failures in a row: the row goes Offline.
+    Fatal,
+}
+
+/// Failure bookkeeping: one reopen per size change, Offline after three in a row.
+#[derive(Default)]
+struct SendFailures {
+    /// Dimensions of the last frame the sender accepted.
+    sent: Option<(u32, u32)>,
+    consecutive: u32,
+}
+
+impl SendFailures {
+    /// The sender took a frame of this size.
+    fn accepted(&mut self, width: u32, height: u32) {
+        self.sent = Some((width, height));
+        self.consecutive = 0;
+    }
+
+    /// The sender refused a frame of this size.
+    fn failed(&mut self, width: u32, height: u32) -> Recovery {
+        if self.sent.is_some_and(|(w, h)| (w, h) != (width, height)) {
+            // Recorded now so the same size never reopens twice.
+            self.sent = Some((width, height));
+            self.consecutive = 0;
+            Recovery::Reopen
+        } else {
+            self.consecutive += 1;
+            if self.consecutive >= MAX_SEND_FAILURES {
+                Recovery::Fatal
+            } else {
+                Recovery::Retry
+            }
+        }
+    }
+}
+
 /// Sends one frame per tick until stopped, refreshing [`RowStats`] every second.
 ///
-/// `on_closed` sets the shared `closed` flag; the loop marks the row offline and
+/// `closed` means the source went away; the loop marks the row offline and
 /// returns on its next tick, so a closed window never keeps sending its last frame.
-#[allow(clippy::too_many_arguments)]
+///
+/// A resolution change the encoder rejects reopens the sender once under the same
+/// name; repeated send failures take the row Offline with the library's message.
 fn send_loop(
-    sender: Arc<Sender>,
+    sender: Arc<SharedSender>,
     sink: Arc<LatestFrame>,
     flags: Arc<CaptureFlags>,
     stats: Arc<Mutex<RowStats>>,
     stop: Arc<AtomicBool>,
-    closed_reason: &'static str,
-    fps_n: u32,
-    fps_d: u32,
-    interval: Duration,
+    setup: SendSetup,
 ) {
     let mut pump = FramePump::default();
-    let mut prev: SenderStats = sender.stats();
+    let mut prev = sender.current().stats();
     let mut sampled_at = Instant::now();
     let mut next = Instant::now();
+    let mut failures = SendFailures::default();
     while !stop.load(Ordering::Relaxed) {
         if flags.closed.load(Ordering::Relaxed) {
-            *stats.lock() = RowStats {
-                state: SourceState::Offline(closed_reason.to_string()),
-                ..RowStats::default()
-            };
+            mark_offline(&stats, setup.closed_reason);
             return;
         }
-        next += interval;
-        if let Some(frame) = pump.next(&sink, clock::now()) {
+        next += setup.interval;
+        if let Some((frame, timestamp)) = pump.next(&sink, clock::now()) {
             let format = VideoFormat {
                 width: frame.width,
                 height: frame.height,
-                fps_n,
-                fps_d,
+                fps_n: setup.fps_n,
+                fps_d: setup.fps_d,
                 alpha: false,
             };
             let stride = frame.width as usize * 4;
-            if let Err(err) = sender.send_bgra(&format, &frame.bgra, stride, frame.timestamp) {
-                tracing::warn!("sending a frame failed: {err}");
+            match sender
+                .current()
+                .send_bgra(&format, &frame.bgra, stride, timestamp)
+            {
+                Ok(()) => failures.accepted(frame.width, frame.height),
+                Err(err) => {
+                    tracing::warn!("sending a frame failed: {err}");
+                    match failures.failed(frame.width, frame.height) {
+                        Recovery::Reopen => {
+                            let reopened =
+                                Sender::open(&setup.name, Mode::Hx, setup.quality, setup.codec);
+                            match reopened {
+                                Ok(reopened) => {
+                                    sender.replace(reopened);
+                                    match sender.current().send_bgra(
+                                        &format,
+                                        &frame.bgra,
+                                        stride,
+                                        timestamp,
+                                    ) {
+                                        Ok(()) => failures.accepted(frame.width, frame.height),
+                                        Err(retry) => {
+                                            tracing::warn!(
+                                                "sending after reopening failed: {retry}"
+                                            );
+                                            if failures.failed(frame.width, frame.height)
+                                                == Recovery::Fatal
+                                            {
+                                                mark_offline(&stats, &retry.to_string());
+                                                return;
+                                            }
+                                        }
+                                    }
+                                }
+                                Err(open_err) => {
+                                    mark_offline(
+                                        &stats,
+                                        &RuntimeError::Library(open_err).to_string(),
+                                    );
+                                    return;
+                                }
+                            }
+                        }
+                        Recovery::Fatal => {
+                            mark_offline(&stats, &err.to_string());
+                            return;
+                        }
+                        Recovery::Retry => {}
+                    }
+                }
             }
         }
         let elapsed = sampled_at.elapsed().as_secs_f64();
         if elapsed >= 1.0 {
-            let now = sender.stats();
+            let now = sender.current().stats();
             let mut row = stats.lock();
             if !matches!(row.state, SourceState::Offline(_)) {
                 row.fps = now.frames_sent.saturating_sub(prev.frames_sent) as f64 / elapsed;
@@ -371,6 +512,16 @@ fn send_loop(
             next = Instant::now();
         }
     }
+}
+
+/// Take the row Offline with `reason`, keeping any audio message.
+fn mark_offline(stats: &Mutex<RowStats>, reason: &str) {
+    let mut row = stats.lock();
+    row.state = SourceState::Offline(reason.to_string());
+    row.fps = 0.0;
+    row.mbps = 0.0;
+    row.connections = 0;
+    row.encode_ms = 0.0;
 }
 
 /// Live audio error, else the one stored when audio failed to start.
@@ -408,23 +559,69 @@ fn state_labels_drop_the_offline_reason() {
 }
 
 #[test]
-fn static_source_repeats_the_last_frame() {
+fn static_source_repeats_the_last_frame_without_copying_it() {
     let sink = LatestFrame::default();
     let mut pump = FramePump::default();
     assert!(pump.next(&sink, 100).is_none());
 
-    sink.store_from_arc(Arc::new(FrameData {
+    let captured = Arc::new(FrameData {
         width: 2,
         height: 2,
         timestamp: 10,
         bgra: vec![1; 16],
-    }));
-    let first = pump.next(&sink, 100).unwrap();
-    assert_eq!(first.timestamp, 10);
+    });
+    sink.store_from_arc(Arc::clone(&captured));
+    let (first, first_ts) = pump.next(&sink, 100).expect("fresh frame");
+    assert_eq!(first_ts, 10);
+    assert!(Arc::ptr_eq(&first, &captured));
 
-    let repeat = pump.next(&sink, 200).expect("must resend");
-    assert_eq!(repeat.timestamp, 200);
-    assert_eq!(repeat.bgra, first.bgra);
+    let (repeat, repeat_ts) = pump.next(&sink, 200).expect("must resend");
+    assert_eq!(repeat_ts, 200);
+    assert!(Arc::ptr_eq(&repeat, &first));
+}
+
+#[test]
+fn send_failures_reopen_once_per_size_change_then_go_fatal() {
+    let mut failures = SendFailures::default();
+    // Nothing accepted yet: no size to compare, so it counts as a plain failure.
+    assert_eq!(failures.failed(640, 480), Recovery::Retry);
+    failures.accepted(640, 480);
+    assert_eq!(failures.failed(640, 480), Recovery::Retry);
+    assert_eq!(failures.failed(640, 480), Recovery::Retry);
+    // A new size reopens once; the same size failing after that never reopens again.
+    assert_eq!(failures.failed(800, 600), Recovery::Reopen);
+    assert_eq!(failures.failed(800, 600), Recovery::Retry);
+    assert_eq!(failures.failed(800, 600), Recovery::Retry);
+    assert_eq!(failures.failed(800, 600), Recovery::Fatal);
+    // One accepted frame clears the count.
+    failures.accepted(800, 600);
+    assert_eq!(failures.failed(800, 600), Recovery::Retry);
+}
+
+#[test]
+fn offline_clears_counters_and_keeps_the_audio_message() {
+    let stats = Mutex::new(RowStats {
+        fps: 30.0,
+        mbps: 4.0,
+        connections: 2,
+        encode_ms: 3.0,
+        audio_error: Some("audio unavailable: no endpoint".into()),
+        state: SourceState::Live,
+    });
+    mark_offline(&stats, "OMT-HX: encoder failed");
+    let row = stats.lock().clone();
+    assert_eq!(
+        row.state,
+        SourceState::Offline("OMT-HX: encoder failed".into())
+    );
+    assert_eq!(
+        (row.fps, row.mbps, row.connections, row.encode_ms),
+        (0.0, 0.0, 0, 0.0)
+    );
+    assert_eq!(
+        row.audio_error.as_deref(),
+        Some("audio unavailable: no endpoint")
+    );
 }
 
 #[test]
