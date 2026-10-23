@@ -10,6 +10,7 @@ members = [
     "apps/test-patterns",
     "apps/config-manager",
     "apps/discovery-server",
+    "apps/desktop-capture",
     "apps/launcher/src-tauri",
 ]
 default-members = [
@@ -22,6 +23,7 @@ default-members = [
     "apps/test-patterns",
     "apps/config-manager",
     "apps/discovery-server",
+    "apps/desktop-capture",
 ]
 
 [workspace.package]
@@ -55,6 +57,8 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
+windows-capture = "=1.5.0"
+wasapi = "0.26"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 
 [profile.release]
