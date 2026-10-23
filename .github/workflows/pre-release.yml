@@ -156,7 +156,7 @@ jobs:
             - **macOS (Intel)**: `.dmg` for `x86_64-apple-darwin`
             - **Linux x64**: `.deb` or `.AppImage` for `x86_64-unknown-linux-gnu`
             - **Linux Arm64**: `.deb` or `.AppImage` for `aarch64-unknown-linux-gnu`
-            - **Desktop Capture (Windows only)**: `desktop-capture.zip`, extract it and run the exe from that folder
+            ${{ steps.desktop_capture.outputs.packaged == 'true' && '- **Desktop Capture (Windows only)**: `desktop-capture.zip`, extract it and run the exe from that folder' || '' }}
 
             ### Suite contents
             The installer includes the launcher plus sidecar tools:

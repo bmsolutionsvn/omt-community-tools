@@ -34,7 +34,7 @@ OMT-HX receiver.
 Each row has:
 
 - an enabled checkbox and an editable name;
-- a state pill (Ready, Live, Connecting, Offline, with the reason on failure);
+- a state pill (Idle, Ready, Live, Connecting, Offline, with the reason on failure);
 - FPS, Mbps, connections and encode time;
 - an expander with **Max FPS** (5, 15, 25, 29.97, 30, 50, 59.94, 60),
   **Show cursor**, **Audio** (No audio or a render device) and **Remove**.
@@ -60,8 +60,9 @@ in this version.
 - **Elevated (UAC) windows and protected content.** Windows Graphics Capture
   returns a black or blocked picture for windows of elevated processes and for
   DRM-protected content. This is a Windows limitation, with no workaround here.
-- **No hardware encoder**: the encoder falls back to software HEVC/H.264, which
-  is slower; the row's encode time shows the cost.
+- **Hardware encoder when present.** NVENC/AMF/QSV is used when the machine has
+  one; otherwise the encoder falls back to software HEVC/H.264, which is slower
+  and shows in the row's encode time.
 - **Duplicate audio.** Audio is the selected render device's loopback, so two
   sources on the same device carry the same audio. The footer shows a warning
   while that is the case.
@@ -86,7 +87,8 @@ powershell -File scripts\package-desktop-capture.ps1   # -OmthxRoot <OMT-HX chec
 powershell -File scripts\desktop-capture-e2e.ps1       # needs OMT-HX's omthx-recv.exe
 ```
 
-The end-to-end script sends the primary screen for 15 seconds, receives 5
-seconds with `omthx-recv --dump frame.bmp`, and fails if the frame is missing or
-all black. It checks video only; audio is covered by unit tests and the manual
-lip-sync check.
+The end-to-end script sends the primary screen for 20 seconds, receives 5
+seconds with `omthx-recv --dump frame.bmp`, and fails if the frame is missing,
+the wrong size, or all black. `-SelfCheck` exercises the black-frame check
+against synthetic BMPs without starting the sender. It checks video only; audio
+is covered by unit tests and the manual lip-sync check.
