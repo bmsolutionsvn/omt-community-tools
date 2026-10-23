@@ -62,6 +62,10 @@ pub struct DesktopCaptureApp {
     config: DesktopCaptureConfig,
     /// Minimise once, on the first frame.
     minimise: bool,
+    /// Why the saved settings could not be read at startup, shown in the toolbar.
+    startup_warning: Option<String>,
+    /// Why the last save failed, shown in the footer until a save succeeds.
+    save_error: Option<String>,
 }
 
 impl DesktopCaptureApp {
@@ -90,6 +94,8 @@ impl DesktopCaptureApp {
             rows,
             minimise: config.minimise_on_start,
             config,
+            startup_warning: None,
+            save_error: None,
         };
         if app.config.start_on_launch {
             app.start_all();
@@ -97,11 +103,20 @@ impl DesktopCaptureApp {
         app
     }
 
+    /// Show why the saved settings could not be read; the old file was kept aside.
+    pub fn warn(&mut self, warning: String) {
+        self.startup_warning = Some(warning);
+    }
+
     /// Persist the current rows and footer settings.
-    pub fn save(&self) {
-        if let Err(err) = save_desktop_capture_config(&self.config()) {
-            tracing::warn!("saving desktop capture settings failed: {err}");
-        }
+    pub fn save(&mut self) {
+        self.save_error = match save_desktop_capture_config(&self.config()) {
+            Ok(()) => None,
+            Err(err) => {
+                tracing::warn!("saving desktop capture settings failed: {err}");
+                Some(format!("Could not save settings: {err}"))
+            }
+        };
     }
 
     /// Current settings in the shape that is written to disk.
@@ -226,6 +241,15 @@ pub fn fps_label(fps_n: u32, fps_d: u32) -> String {
     }
 }
 
+/// A renamed source: trimmed, never blank, and unique among `taken`.
+fn settled_name(name: &str, index: usize, taken: &[String]) -> String {
+    let base = match name.trim() {
+        "" => format!("Source {}", index + 1),
+        trimmed => trimmed.to_string(),
+    };
+    catalog::unique_name(&base, taken)
+}
+
 /// Whether two enabled sources send the same, non-empty audio endpoint.
 pub fn duplicate_audio(sources: &[DesktopSourceConfig]) -> bool {
     let mut seen = std::collections::HashSet::new();
@@ -316,6 +340,9 @@ impl eframe::App for DesktopCaptureApp {
                 }
                 ui.weak(self.summary());
             });
+            if let Some(warning) = &self.startup_warning {
+                ui.colored_label(ui.visuals().warn_fg_color, warning.as_str());
+            }
         });
 
         egui::Panel::bottom("footer").show(ui, |ui| {
@@ -381,6 +408,9 @@ impl eframe::App for DesktopCaptureApp {
                     "Two sources send the same audio device.",
                 );
             }
+            if let Some(error) = &self.save_error {
+                ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+            }
         });
 
         egui::CentralPanel::default().show(ui, |ui| {
@@ -389,6 +419,7 @@ impl eframe::App for DesktopCaptureApp {
                 return;
             }
             let devices = &self.catalog.audio_devices;
+            let names: Vec<String> = self.rows.iter().map(|row| row.cfg.name.clone()).collect();
             for (index, row) in self.rows.iter_mut().enumerate() {
                 let stats = row.runtime.as_ref().map(SourceRuntime::stats);
                 let (pill, colour) = match (&stats, &row.entry) {
@@ -397,17 +428,27 @@ impl eframe::App for DesktopCaptureApp {
                     (None, Some(_)) => ("Idle", ui.visuals().weak_text_color()),
                 };
                 ui.horizontal(|ui| {
-                    let enabled = ui
-                        .checkbox(&mut row.cfg.enabled, "")
-                        .on_hover_text("Include in Start all");
-                    if enabled.changed() {
+                    if ui.checkbox(&mut row.cfg.enabled, "On").changed() {
                         changed = true;
                     }
-                    if ui
-                        .add(egui::TextEdit::singleline(&mut row.cfg.name).desired_width(180.0))
-                        .changed()
-                    {
+                    let name_edit =
+                        ui.add(egui::TextEdit::singleline(&mut row.cfg.name).desired_width(180.0));
+                    if name_edit.changed() {
                         changed = true;
+                    }
+                    // Two senders must never advertise the same name mid-session.
+                    if name_edit.lost_focus() {
+                        let taken: Vec<String> = names
+                            .iter()
+                            .enumerate()
+                            .filter(|(other, _)| *other != index)
+                            .map(|(_, name)| name.clone())
+                            .collect();
+                        let settled = settled_name(&row.cfg.name, index, &taken);
+                        if settled != row.cfg.name {
+                            row.cfg.name = settled;
+                            changed = true;
+                        }
                     }
                     if let Some(entry) = &row.entry {
                         ui.weak(&entry.detail);
@@ -585,6 +626,18 @@ mod tests {
             source_config("A", Some("")),
             source_config("B", Some(""))
         ]));
+    }
+
+    #[test]
+    fn renaming_to_a_taken_name_gets_a_suffix() {
+        let taken = vec!["Screen 1".to_string()];
+        assert_eq!(settled_name("Screen 1", 1, &taken), "Screen 1 (2)");
+        assert_eq!(settled_name("  Desk  ", 1, &taken), "Desk");
+        assert_eq!(settled_name("   ", 0, &taken), "Source 1");
+        assert_eq!(
+            settled_name("", 0, &["Source 1".to_string()]),
+            "Source 1 (2)"
+        );
     }
 
     #[test]

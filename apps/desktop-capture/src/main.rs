@@ -74,10 +74,25 @@ fn main() -> anyhow::Result<()> {
         return selftest(seconds);
     }
 
-    let config = suite_core::load_desktop_capture_config().unwrap_or_else(|err| {
-        tracing::warn!("loading desktop capture settings failed, using defaults: {err}");
-        Default::default()
-    });
+    let (config, startup_warning) = match suite_core::load_desktop_capture_config() {
+        Ok(config) => (config, None),
+        Err(err) => {
+            tracing::warn!("loading desktop capture settings failed: {err}");
+            let kept = suite_core::app_config_path("desktop-capture")
+                .map_err(|path_err| path_err.to_string())
+                .and_then(|path| archive_unreadable(&path).map_err(|err| err.to_string()));
+            let warning = match kept {
+                Ok(path) => format!(
+                    "settings could not be read ({err}); kept the old file as {}",
+                    path.display()
+                ),
+                Err(keep_err) => format!(
+                    "settings could not be read ({err}); could not keep the old file: {keep_err}"
+                ),
+            };
+            (Default::default(), Some(warning))
+        }
+    };
     let title = "OMT Desktop Capture";
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
@@ -89,13 +104,28 @@ fn main() -> anyhow::Result<()> {
         title,
         options,
         Box::new(move |_cc| {
-            Ok(Box::new(app::DesktopCaptureApp::new(
-                config,
-                app::Catalog::enumerate(),
-            )))
+            let mut app = app::DesktopCaptureApp::new(config, app::Catalog::enumerate());
+            if let Some(warning) = startup_warning {
+                app.warn(warning);
+            }
+            Ok(Box::new(app))
         }),
     )
     .map_err(|e| anyhow::anyhow!("eframe: {e}"))
+}
+
+/// Move an unreadable settings file aside so the next save cannot overwrite it.
+///
+/// Returns the `{stem}.bad.json` sibling it was renamed to; an older archive is replaced.
+#[cfg(any(windows, test))]
+fn archive_unreadable(path: &std::path::Path) -> std::io::Result<std::path::PathBuf> {
+    let stem = path.file_stem().unwrap_or_default().to_string_lossy();
+    let target = path.with_file_name(format!("{stem}.bad.json"));
+    if target.exists() {
+        std::fs::remove_file(&target)?;
+    }
+    std::fs::rename(path, &target)?;
+    Ok(target)
 }
 
 /// Headless check: send the primary monitor as `Screen 1` for `seconds`.
@@ -142,4 +172,25 @@ fn selftest_defaults_to_ten_seconds() {
         Some(8)
     );
     assert!(parse_args(&["--selftest", "--seconds", "0"]).is_err());
+}
+
+#[test]
+fn unreadable_settings_are_kept_as_bad_json() {
+    let dir = std::env::temp_dir().join(format!(
+        "omt-desktop-capture-archive-{}",
+        std::process::id()
+    ));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).unwrap();
+    let path = dir.join("desktop-capture.json");
+    std::fs::write(&path, "{ not json").unwrap();
+    let stale = dir.join("desktop-capture.bad.json");
+    std::fs::write(&stale, "an older broken file").unwrap();
+
+    let kept = archive_unreadable(&path).unwrap();
+
+    assert_eq!(kept, stale);
+    assert!(!path.exists());
+    assert_eq!(std::fs::read_to_string(&kept).unwrap(), "{ not json");
+    let _ = std::fs::remove_dir_all(dir);
 }
