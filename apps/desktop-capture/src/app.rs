@@ -55,7 +55,7 @@ impl DesktopCaptureApp {
 
     fn add_source(&mut self, entry: Entry) {
         let taken: Vec<String> = self.sources.iter().map(|s| s.name.clone()).collect();
-        let name = catalog::unique_name(&entry.label, &taken);
+        let name = catalog::unique_name(&catalog::default_name(&entry), &taken);
         self.sources.push(Source { entry, name });
     }
 }

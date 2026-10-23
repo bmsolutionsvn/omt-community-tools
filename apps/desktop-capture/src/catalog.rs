@@ -26,11 +26,16 @@ pub enum CatalogError {
     Windows(#[from] windows_capture::window::Error),
 }
 
-/// All monitors, primary first in label order (`Screen N (Primary)`).
+/// Longest default source name before a ` (2)` uniqueness suffix is added.
+const NAME_MAX_CHARS: usize = 64;
+
+/// All monitors, primary first: `Screen 1` is always the primary.
 pub fn monitors() -> Result<Vec<Entry>, CatalogError> {
     let primary = Monitor::primary().ok();
-    let mut entries = Vec::new();
-    for (index, monitor) in Monitor::enumerate()?.into_iter().enumerate() {
+    let mut found = Monitor::enumerate()?;
+    found.sort_by_key(|monitor| Some(*monitor) != primary);
+    let mut entries = Vec::with_capacity(found.len());
+    for (index, monitor) in found.into_iter().enumerate() {
         // A monitor without a device name cannot be saved and reattached.
         let Ok(device) = monitor.device_name() else {
             continue;
@@ -61,9 +66,7 @@ pub fn windows(self_pid: u32) -> Result<Vec<Entry>, CatalogError> {
         if !is_capturable(&title, window.is_valid(), pid, self_pid) {
             continue;
         }
-        let process = window.process_name().unwrap_or_default();
-        // `DesktopSourceId::Window::process` is stored without the extension.
-        let process = process.strip_suffix(".exe").unwrap_or(&process).to_string();
+        let process = strip_exe(&window.process_name().unwrap_or_default()).to_string();
         entries.push(Entry {
             id: DesktopSourceId::Window {
                 process: process.clone(),
@@ -95,6 +98,44 @@ pub fn unique_name(base: &str, taken: &[String]) -> String {
     unreachable!("suffixes are unbounded")
 }
 
+/// Default saved name: `<process> — <title>` for windows, `Screen N` for monitors.
+///
+/// Display-only annotations such as ` (Primary)` and a trailing `.exe` are dropped,
+/// and the base is truncated to 64 characters before `unique_name` adds a suffix.
+pub fn default_name(entry: &Entry) -> String {
+    let raw = match &entry.id {
+        DesktopSourceId::Monitor { .. } => entry
+            .label
+            .strip_suffix(" (Primary)")
+            .unwrap_or(&entry.label)
+            .to_string(),
+        DesktopSourceId::Window { process, title } => {
+            format!("{} — {title}", strip_exe(process))
+        }
+    };
+    raw.chars().take(NAME_MAX_CHARS).collect()
+}
+
+/// Executable name without a trailing `.exe`, in any case.
+fn strip_exe(process: &str) -> &str {
+    process
+        .rsplit_once('.')
+        .filter(|(stem, ext)| !stem.is_empty() && ext.eq_ignore_ascii_case("exe"))
+        .map_or(process, |(stem, _)| stem)
+}
+
+#[cfg(test)]
+fn window_entry(process: &str, title: &str) -> Entry {
+    Entry {
+        id: DesktopSourceId::Window {
+            process: process.into(),
+            title: title.into(),
+        },
+        label: title.into(),
+        detail: String::new(),
+    }
+}
+
 #[test]
 fn filters_windows_we_cannot_capture() {
     assert!(is_capturable("Notepad", true, 42, 7));
@@ -115,4 +156,41 @@ fn names_are_made_unique() {
         unique_name("Screen 1", &["Screen 1".into(), "Screen 1 (2)".into()]),
         "Screen 1 (3)"
     );
+}
+
+#[test]
+fn window_names_join_process_and_title() {
+    assert_eq!(
+        default_name(&window_entry("notepad", "Untitled")),
+        "notepad — Untitled"
+    );
+    assert_eq!(
+        default_name(&window_entry("notepad.exe", "Untitled")),
+        "notepad — Untitled"
+    );
+    assert_eq!(
+        default_name(&window_entry("NOTEPAD.EXE", "Untitled")),
+        "NOTEPAD — Untitled"
+    );
+}
+
+#[test]
+fn names_are_truncated_before_numbering() {
+    let title = "t".repeat(80);
+    let base = default_name(&window_entry("app", &title));
+    assert_eq!(base.chars().count(), 64);
+    let name = unique_name(&base, std::slice::from_ref(&base));
+    assert_eq!(name, format!("{base} (2)"));
+}
+
+#[test]
+fn monitor_names_drop_the_primary_annotation() {
+    let entry = Entry {
+        id: DesktopSourceId::Monitor {
+            device: r"\\.\DISPLAY1".into(),
+        },
+        label: "Screen 1 (Primary)".into(),
+        detail: "1920×1080".into(),
+    };
+    assert_eq!(default_name(&entry), "Screen 1");
 }
