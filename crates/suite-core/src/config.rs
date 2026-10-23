@@ -330,6 +330,156 @@ impl DiscoveryServerConfig {
     }
 }
 
+/// Encoding quality stored in Desktop Capture preferences.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopQuality {
+    /// Low quality.
+    Low,
+    /// Medium / standard quality.
+    #[default]
+    Medium,
+    /// High quality.
+    High,
+}
+
+/// Video codec for Desktop Capture sources.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum DesktopCodec {
+    /// H.265 / HEVC.
+    #[default]
+    Hevc,
+    /// H.264 / AVC.
+    H264,
+}
+
+/// Saved identity of a Desktop Capture source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum DesktopSourceId {
+    /// A whole monitor.
+    Monitor {
+        /// Monitor device path.
+        device: String,
+    },
+    /// A single window.
+    Window {
+        /// Executable name (without `.exe`).
+        process: String,
+        /// Window title.
+        title: String,
+    },
+}
+
+/// One configured Desktop Capture source.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopSourceConfig {
+    /// Saved source identity used to reattach on launch.
+    pub id: DesktopSourceId,
+    /// Display name shown in the UI.
+    pub name: String,
+    /// Whether the source participates in Start all.
+    pub enabled: bool,
+    /// Frame rate numerator.
+    pub fps_n: u32,
+    /// Frame rate denominator.
+    pub fps_d: u32,
+    /// Whether the mouse cursor is drawn into the picture.
+    pub show_cursor: bool,
+    /// Audio loopback device name; `None` sends no audio.
+    pub audio_device: Option<String>,
+}
+
+impl Default for DesktopSourceConfig {
+    fn default() -> Self {
+        Self {
+            id: DesktopSourceId::Monitor {
+                device: String::new(),
+            },
+            name: "Screen 1".into(),
+            enabled: true,
+            fps_n: 30,
+            fps_d: 1,
+            show_cursor: true,
+            audio_device: None,
+        }
+    }
+}
+
+/// Desktop Capture preferences (`desktop-capture.json`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct DesktopCaptureConfig {
+    /// Schema version.
+    pub schema_version: u32,
+    /// Encoding quality.
+    pub quality: DesktopQuality,
+    /// Video codec.
+    pub codec: DesktopCodec,
+    /// Start enabled sources when the app launches.
+    pub start_on_launch: bool,
+    /// Start with the window minimised.
+    pub minimise_on_start: bool,
+    /// Configured sources.
+    pub sources: Vec<DesktopSourceConfig>,
+}
+
+impl Default for DesktopCaptureConfig {
+    fn default() -> Self {
+        Self {
+            schema_version: 1,
+            quality: DesktopQuality::Medium,
+            codec: DesktopCodec::Hevc,
+            start_on_launch: false,
+            minimise_on_start: false,
+            sources: Vec::new(),
+        }
+    }
+}
+
+/// Frame rates the Desktop Capture UI offers.
+const DESKTOP_FPS_PRESETS: [(u32, u32); 8] = [
+    (5, 1),
+    (15, 1),
+    (25, 1),
+    (30_000, 1_001),
+    (30, 1),
+    (50, 1),
+    (60_000, 1_001),
+    (60, 1),
+];
+
+impl DesktopCaptureConfig {
+    /// Clamp user-facing values into ranges and names the UI accepts.
+    pub fn sanitized(mut self) -> Self {
+        self.schema_version = 1;
+        let mut seen: Vec<String> = Vec::with_capacity(self.sources.len());
+        for (index, source) in self.sources.iter_mut().enumerate() {
+            let trimmed = source.name.trim();
+            let base = if trimmed.is_empty() {
+                format!("Source {}", index + 1)
+            } else {
+                trimmed.to_string()
+            };
+            let mut name = base.clone();
+            let mut suffix = 2;
+            while seen.contains(&name) {
+                name = format!("{base} ({suffix})");
+                suffix += 1;
+            }
+            source.name = name.clone();
+            seen.push(name);
+            if !DESKTOP_FPS_PRESETS.contains(&(source.fps_n, source.fps_d)) {
+                source.fps_n = 30;
+                source.fps_d = 1;
+            }
+        }
+        self
+    }
+}
+
 /// Resolve the suite config directory.
 pub fn config_dir() -> Result<PathBuf, ConfigError> {
     let dirs = ProjectDirs::from("lab", "Mikansei", "OMT Tools").ok_or(ConfigError::NoConfigDir)?;
@@ -384,6 +534,16 @@ pub fn load_launcher_config() -> Result<LauncherConfig, ConfigError> {
 /// Persist Launcher preferences.
 pub fn save_launcher_config(cfg: &LauncherConfig) -> Result<(), ConfigError> {
     save_json_file(&app_config_path("launcher")?, cfg)
+}
+
+/// Load Desktop Capture preferences.
+pub fn load_desktop_capture_config() -> Result<DesktopCaptureConfig, ConfigError> {
+    load_json_file(&app_config_path("desktop-capture")?)
+}
+
+/// Persist Desktop Capture preferences.
+pub fn save_desktop_capture_config(cfg: &DesktopCaptureConfig) -> Result<(), ConfigError> {
+    save_json_file(&app_config_path("desktop-capture")?, cfg)
 }
 
 /// Load Discovery Server GUI preferences.
@@ -552,6 +712,67 @@ mod tests {
             app_config_path("discovery-server").unwrap(),
             dir.join("discovery-server.json")
         );
+    }
+
+    #[test]
+    fn desktop_capture_config_round_trips() {
+        let cfg = DesktopCaptureConfig {
+            schema_version: 1,
+            quality: DesktopQuality::Medium,
+            codec: DesktopCodec::Hevc,
+            start_on_launch: true,
+            minimise_on_start: false,
+            sources: vec![DesktopSourceConfig {
+                id: DesktopSourceId::Monitor {
+                    device: r"\\?\DISPLAY#DELA026#1".into(),
+                },
+                name: "Screen 1".into(),
+                enabled: true,
+                fps_n: 30_000,
+                fps_d: 1_001,
+                show_cursor: true,
+                audio_device: None,
+            }],
+        };
+        let json = serde_json::to_string(&cfg).unwrap();
+        assert!(json.contains(r#""kind":"monitor""#));
+        assert_eq!(
+            serde_json::from_str::<DesktopCaptureConfig>(&json).unwrap(),
+            cfg
+        );
+    }
+
+    #[test]
+    fn desktop_capture_config_sanitizes() {
+        let cfg = DesktopCaptureConfig {
+            sources: vec![
+                DesktopSourceConfig {
+                    name: "  ".into(),
+                    fps_n: 0,
+                    fps_d: 0,
+                    ..Default::default()
+                },
+                DesktopSourceConfig {
+                    name: "Screen 1".into(),
+                    fps_n: 1,
+                    fps_d: 1,
+                    ..Default::default()
+                },
+                DesktopSourceConfig {
+                    name: "Screen 1".into(),
+                    fps_n: 240,
+                    fps_d: 1,
+                    ..Default::default()
+                },
+            ],
+            ..Default::default()
+        };
+        let cfg = cfg.sanitized();
+        assert_eq!(cfg.sources[0].name, "Source 1");
+        assert_eq!((cfg.sources[0].fps_n, cfg.sources[0].fps_d), (30, 1));
+        assert_eq!((cfg.sources[1].fps_n, cfg.sources[1].fps_d), (30, 1));
+        assert_eq!((cfg.sources[2].fps_n, cfg.sources[2].fps_d), (30, 1));
+        assert_eq!(cfg.sources[2].name, "Screen 1 (2)");
     }
 
     #[test]
