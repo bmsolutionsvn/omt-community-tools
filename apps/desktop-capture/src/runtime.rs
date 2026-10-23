@@ -229,7 +229,10 @@ impl SourceRuntime {
     /// shortcut: a capture that fails is noticed only when this is polled; add a
     /// watcher thread if a run can sit without polling.
     pub fn stats(&self) -> RowStats {
-        let audio_error = self.audio.as_ref().and_then(AudioRuntime::error);
+        let audio_error = merged_audio_error(
+            self.audio.as_ref().and_then(AudioRuntime::error),
+            self.stats.lock().audio_error.clone(),
+        );
         let finished = self
             .capture
             .lock()
@@ -244,6 +247,9 @@ impl SourceRuntime {
                 Err(err) => err.to_string(),
             };
             self.stop.store(true, Ordering::Relaxed);
+            if let Some(audio) = &self.audio {
+                audio.request_stop();
+            }
             *self.stats.lock() = RowStats {
                 state: SourceState::Offline(reason),
                 audio_error: audio_error.clone(),
@@ -355,6 +361,11 @@ fn send_loop(
     }
 }
 
+/// Live audio error, else the one stored when audio failed to start.
+fn merged_audio_error(live: Option<String>, stored: Option<String>) -> Option<String> {
+    live.or(stored)
+}
+
 fn hx_quality(quality: DesktopQuality) -> Quality {
     match quality {
         DesktopQuality::Low => Quality::Low,
@@ -395,6 +406,16 @@ fn missing_library_has_one_message() {
     assert_eq!(
         RuntimeError::LibraryMissing.to_string(),
         "OMT-HX library missing: put omthx.dll and its FFmpeg DLLs beside the app"
+    );
+}
+
+#[test]
+fn start_time_audio_failure_stays_on_the_row() {
+    let stored = Some("audio unavailable: no endpoint".to_string());
+    assert_eq!(merged_audio_error(None, stored.clone()), stored);
+    assert_eq!(
+        merged_audio_error(Some("audio unavailable: device removed".into()), stored),
+        Some("audio unavailable: device removed".to_string())
     );
 }
 

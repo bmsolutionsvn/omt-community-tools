@@ -388,7 +388,7 @@ pub struct DesktopSourceConfig {
     pub fps_d: u32,
     /// Whether the mouse cursor is drawn into the picture.
     pub show_cursor: bool,
-    /// Audio loopback device name; `None` sends no audio.
+    /// Audio loopback endpoint id; `None` sends no audio.
     pub audio_device: Option<String>,
 }
 

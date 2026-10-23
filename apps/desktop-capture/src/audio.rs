@@ -122,16 +122,16 @@ pub struct AudioRuntime {
 }
 
 impl AudioRuntime {
-    /// Start loopback capture on `device_id` (default output when `None`).
+    /// Start loopback capture on the render endpoint `device_id`.
     ///
-    /// Returns once the stream is running; a failure here is reported as
-    /// [`AudioError::Unsupported`] so a source can keep sending video without audio.
+    /// `None` and `Some("")` mean no endpoint is selected: audio does not start and
+    /// [`AudioError::Unsupported`] lets the source keep sending video without it.
     pub fn start(device_id: Option<&str>, sender: Arc<Sender>) -> Result<Self, AudioError> {
+        let device_id = selected_device(device_id)?.to_owned();
         let (ready_tx, ready_rx) = mpsc::channel();
         let stop = Arc::new(AtomicBool::new(false));
         let error = Arc::new(Mutex::new(None));
         let thread = thread::spawn({
-            let device_id = device_id.map(str::to_owned);
             let stop = Arc::clone(&stop);
             let error = Arc::clone(&error);
             move || capture_thread(device_id, sender, stop, error, ready_tx)
@@ -163,9 +163,14 @@ impl AudioRuntime {
         self.error.lock().clone()
     }
 
+    /// Ask the capture thread to stop without waiting for it.
+    pub fn request_stop(&self) {
+        self.stop.store(true, Ordering::Relaxed);
+    }
+
     /// Stop capturing and wait for the thread. Safe to call more than once.
     pub fn stop(&mut self) {
-        self.stop.store(true, Ordering::Relaxed);
+        self.request_stop();
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();
         }
@@ -265,13 +270,9 @@ struct Opened {
     buffer_ticks: i64,
 }
 
-fn open_loopback(device_id: Option<&str>) -> Result<Opened, String> {
+fn open_loopback(device_id: &str) -> Result<Opened, String> {
     let enumerator = DeviceEnumerator::new().map_err(text)?;
-    let device = match device_id {
-        Some(id) => enumerator.get_device(id),
-        None => enumerator.get_default_device(&Direction::Render),
-    }
-    .map_err(text)?;
+    let device = enumerator.get_device(device_id).map_err(text)?;
     let mut client = device.get_iaudioclient().map_err(text)?;
     let format = client.get_mixformat().map_err(text)?;
     let rate = format.get_samplespersec() as usize;
@@ -303,7 +304,7 @@ fn open_loopback(device_id: Option<&str>) -> Result<Opened, String> {
 }
 
 fn capture_thread(
-    device_id: Option<String>,
+    device_id: String,
     sender: Arc<Sender>,
     stop: Arc<AtomicBool>,
     error: Arc<Mutex<Option<String>>>,
@@ -318,13 +319,13 @@ fn capture_thread(
     };
     let mut first = Some(ready);
     loop {
-        match open_loopback(device_id.as_deref()) {
+        match open_loopback(&device_id) {
             Ok(opened) => {
                 if let Some(ready) = first.take() {
                     let _ = ready.send(Ok(()));
                 }
                 *error.lock() = None;
-                let result = capture_loop(&opened, &sender, &stop);
+                let result = capture_loop(&opened, &sender, &stop, &error);
                 let _ = opened.client.stop_stream();
                 match result {
                     Ok(()) => return,
@@ -353,7 +354,12 @@ fn capture_thread(
 }
 
 /// Read packets, coalesce them to ~10 ms, and send planar f32 until stopped.
-fn capture_loop(opened: &Opened, sender: &Sender, stop: &AtomicBool) -> Result<(), String> {
+fn capture_loop(
+    opened: &Opened,
+    sender: &Sender,
+    stop: &AtomicBool,
+    error: &Mutex<Option<String>>,
+) -> Result<(), String> {
     let flush_frames = (opened.rate * PACKET_MS / 1000).max(1);
     let mut pending: Vec<f32> = Vec::new();
     let mut pending_ts = 0i64;
@@ -383,7 +389,13 @@ fn capture_loop(opened: &Opened, sender: &Sender, stop: &AtomicBool) -> Result<(
             if pending.is_empty() {
                 pending_ts = ts;
             }
-            pending.extend(opened.convert.convert(&buffer[..bytes]));
+            pending.extend(packet_samples(
+                &buffer[..bytes],
+                read as usize,
+                opened.channels,
+                opened.convert,
+                info.flags.silent,
+            ));
             read_any = true;
         }
         if pending.len() / opened.channels >= flush_frames {
@@ -395,6 +407,7 @@ fn capture_loop(opened: &Opened, sender: &Sender, stop: &AtomicBool) -> Result<(
                 pending_ts,
             ) {
                 tracing::warn!("sending audio failed: {err}");
+                *error.lock() = Some(format!("audio send failed: {err}"));
             }
             pending.clear();
         }
@@ -403,6 +416,28 @@ fn capture_loop(opened: &Opened, sender: &Sender, stop: &AtomicBool) -> Result<(
         }
     }
     Ok(())
+}
+
+/// Samples for one packet: zeros when WASAPI marks it silent, its contents otherwise.
+fn packet_samples(
+    buffer: &[u8],
+    frames: usize,
+    channels: usize,
+    convert: Convert,
+    silent: bool,
+) -> Vec<f32> {
+    if silent {
+        vec![0.0; frames * channels]
+    } else {
+        convert.convert(buffer)
+    }
+}
+
+/// The endpoint to capture; an empty or missing id means no audio.
+fn selected_device(device_id: Option<&str>) -> Result<&str, AudioError> {
+    device_id
+        .filter(|id| !id.is_empty())
+        .ok_or_else(|| AudioError::Unsupported("no audio device selected".into()))
 }
 
 fn text(err: impl std::fmt::Display) -> String {
@@ -439,6 +474,55 @@ fn converts_pcm32() {
     assert!((out[1] + 1.0).abs() < 1e-3);
 }
 
+#[test]
+fn converts_24_in_32_through_the_format() {
+    let format = WaveFormat::new(32, 24, &SampleType::Int, 48_000, 2, None);
+    let convert = Convert::for_format(&format).expect("PCM 24-in-32");
+    let half = 1i32 << 30; // 24 valid bits, left aligned: 0.5 after >> 8 and scaling.
+    let bytes: Vec<u8> = [half, -half]
+        .iter()
+        .flat_map(|sample| sample.to_le_bytes())
+        .collect();
+    let out = convert.convert(&bytes);
+    assert_eq!(out.len(), 2);
+    assert!((out[0] - 0.5).abs() < 1e-6);
+    assert!((out[1] + 0.5).abs() < 1e-6);
+}
+
+#[test]
+fn silent_packets_become_zeros() {
+    let silence = packet_samples(&[0xFF; 8], 2, 2, Convert::F32, true);
+    assert_eq!(silence, vec![0.0; 4]);
+    let one = packet_samples(&[0, 0, 0, 0, 0, 0, 128, 63], 2, 1, Convert::F32, false);
+    assert_eq!(one, vec![0.0, 1.0]);
+}
+
+#[test]
+fn empty_or_missing_device_is_no_audio() {
+    assert!(matches!(
+        selected_device(None),
+        Err(AudioError::Unsupported(_))
+    ));
+    assert!(matches!(
+        selected_device(Some("")),
+        Err(AudioError::Unsupported(_))
+    ));
+    assert_eq!(selected_device(Some("endpoint")).unwrap(), "endpoint");
+}
+
+#[test]
+fn request_stop_flips_the_flag() {
+    let stop = Arc::new(AtomicBool::new(false));
+    let mut runtime = AudioRuntime {
+        stop: Arc::clone(&stop),
+        error: Arc::new(Mutex::new(None)),
+        thread: Some(thread::spawn(|| {})),
+    };
+    runtime.request_stop();
+    assert!(stop.load(Ordering::Relaxed));
+    runtime.stop();
+}
+
 /// Opens the default render endpoint's loopback.
 ///
 /// `wasapi` 0.26 needs real hardware, so this stays opt-in:
@@ -448,8 +532,11 @@ fn converts_pcm32() {
 fn default_loopback_opens() {
     let _com = Com::init().expect("COM");
     let devices = devices().expect("devices");
-    assert!(devices.iter().any(|d| d.is_default), "no default device");
-    let opened = open_loopback(None).expect("loopback opens");
+    let default = devices
+        .iter()
+        .find(|device| device.is_default)
+        .expect("default device");
+    let opened = open_loopback(&default.id).expect("loopback opens");
     assert!(opened.rate > 0 && opened.channels > 0);
     opened.client.stop_stream().expect("stop");
 }
