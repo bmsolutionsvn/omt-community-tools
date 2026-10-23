@@ -10,6 +10,8 @@ mod capture;
 #[cfg(windows)]
 mod catalog;
 #[cfg(windows)]
+mod clock;
+#[cfg(windows)]
 mod frame;
 #[cfg(windows)]
 mod runtime;

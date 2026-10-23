@@ -6,6 +6,7 @@ use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 
+use crate::clock;
 use crate::frame::{FrameData, LatestFrame, packed_rows, pad_to_even};
 
 /// Failure while turning a captured frame into a [`FrameData`].
@@ -34,7 +35,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        let timestamp = frame.timestamp().Duration;
+        // WGC timestamps are QPC since boot; OMT wants the wall-clock epoch.
+        let timestamp = clock::from_qpc(frame.timestamp().Duration);
         let mut buffer = frame.buffer()?;
         let width = buffer.width();
         let height = buffer.height();

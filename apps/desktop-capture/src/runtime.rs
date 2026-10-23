@@ -8,7 +8,6 @@ use std::time::{Duration, Instant};
 use omthx::{Codec, Mode, Quality, Sender, SenderStats, VideoFormat};
 use parking_lot::Mutex;
 use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig};
-use windows::Win32::System::Performance::{QueryPerformanceCounter, QueryPerformanceFrequency};
 use windows_capture::capture::{
     CaptureControl, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
 };
@@ -19,10 +18,8 @@ use windows_capture::settings::{
 
 use crate::capture::{CaptureError, CaptureHandler};
 use crate::catalog::{self, Entry};
+use crate::clock;
 use crate::frame::{FrameData, LatestFrame};
-
-/// 100 ns ticks per second, the unit of OMT timestamps.
-const TICKS_PER_SEC: i128 = 10_000_000;
 
 /// Failure to start one source.
 #[derive(Debug, thiserror::Error)]
@@ -195,7 +192,10 @@ impl SourceRuntime {
                 Err(err) => err.to_string(),
             };
             self.stop.store(true, Ordering::Relaxed);
-            self.stats.lock().state = SourceState::Offline(reason);
+            *self.stats.lock() = RowStats {
+                state: SourceState::Offline(reason),
+                ..RowStats::default()
+            };
         }
         self.stats.lock().clone()
     }
@@ -214,7 +214,10 @@ impl SourceRuntime {
         if let Some(control) = self.capture.lock().take()
             && let Err(err) = control.stop()
         {
-            self.stats.lock().state = SourceState::Offline(err.to_string());
+            *self.stats.lock() = RowStats {
+                state: SourceState::Offline(err.to_string()),
+                ..RowStats::default()
+            };
         }
     }
 }
@@ -241,7 +244,7 @@ fn send_loop(
     let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
         next += interval;
-        if let Some(frame) = pump.next(&sink, now_ticks()) {
+        if let Some(frame) = pump.next(&sink, clock::now()) {
             let format = VideoFormat {
                 width: frame.width,
                 height: frame.height,
@@ -258,11 +261,12 @@ fn send_loop(
         if elapsed >= 1.0 {
             let now = sender.stats();
             let mut row = stats.lock();
-            row.fps = now.frames_sent.saturating_sub(prev.frames_sent) as f64 / elapsed;
-            row.mbps = now.bytes_sent.saturating_sub(prev.bytes_sent) as f64 * 8.0 / elapsed / 1e6;
-            row.connections = now.connections;
-            row.encode_ms = now.encode_ms;
             if !matches!(row.state, SourceState::Offline(_)) {
+                row.fps = now.frames_sent.saturating_sub(prev.frames_sent) as f64 / elapsed;
+                row.mbps =
+                    now.bytes_sent.saturating_sub(prev.bytes_sent) as f64 * 8.0 / elapsed / 1e6;
+                row.connections = now.connections;
+                row.encode_ms = now.encode_ms;
                 row.state = if now.connections > 0 {
                     SourceState::Live
                 } else {
@@ -278,22 +282,6 @@ fn send_loop(
             next = Instant::now();
         }
     }
-}
-
-/// QPC in 100 ns ticks, the unit OMT timestamps use.
-fn now_ticks() -> i64 {
-    let mut count = 0i64;
-    let mut freq = 0i64;
-    let ok = unsafe {
-        QueryPerformanceCounter(&mut count).is_ok()
-            && QueryPerformanceFrequency(&mut freq).is_ok()
-            && freq > 0
-    };
-    if !ok {
-        return 0;
-    }
-    // i128 keeps the conversion exact past the 25-hour i64 overflow point.
-    (i128::from(count) * TICKS_PER_SEC / i128::from(freq)) as i64
 }
 
 fn hx_quality(quality: DesktopQuality) -> Quality {
