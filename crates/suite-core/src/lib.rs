@@ -12,10 +12,10 @@ mod theme;
 mod version;
 
 pub use config::{
-    DesktopCaptureConfig, DesktopCodec, DesktopQuality, DesktopSourceConfig, DesktopSourceId,
-    DiscoveryServerConfig, HxCodec, LauncherConfig, PlayoutMode, SendMode, StudioMonitorConfig,
-    SuiteConfig, TestPatternsConfig, TestPatternsQuality, VideoDecodePath, app_config_path,
-    config_dir, config_path, load_config, load_desktop_capture_config,
+    DESKTOP_FPS_PRESETS, DesktopCaptureConfig, DesktopCodec, DesktopQuality, DesktopSourceConfig,
+    DesktopSourceId, DiscoveryServerConfig, HxCodec, LauncherConfig, PlayoutMode, SendMode,
+    StudioMonitorConfig, SuiteConfig, TestPatternsConfig, TestPatternsQuality, VideoDecodePath,
+    app_config_path, config_dir, config_path, load_config, load_desktop_capture_config,
     load_discovery_server_config, load_launcher_config, load_studio_monitor_config,
     load_test_patterns_config, save_config, save_desktop_capture_config,
     save_discovery_server_config, save_launcher_config, save_studio_monitor_config,

@@ -440,7 +440,7 @@ impl Default for DesktopCaptureConfig {
 }
 
 /// Frame rates the Desktop Capture UI offers.
-const DESKTOP_FPS_PRESETS: [(u32, u32); 8] = [
+pub const DESKTOP_FPS_PRESETS: [(u32, u32); 8] = [
     (5, 1),
     (15, 1),
     (25, 1),

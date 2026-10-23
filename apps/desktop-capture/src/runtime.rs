@@ -53,6 +53,18 @@ pub enum SourceState {
     Offline(String),
 }
 
+impl SourceState {
+    /// Short name for the row's state pill.
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Connecting => "Connecting",
+            Self::Ready => "Ready",
+            Self::Live => "Live",
+            Self::Offline(_) => "Offline",
+        }
+    }
+}
+
 impl std::fmt::Display for SourceState {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -379,6 +391,20 @@ fn hx_codec(codec: DesktopCodec) -> Codec {
         DesktopCodec::Hevc => Codec::Hevc,
         DesktopCodec::H264 => Codec::H264,
     }
+}
+
+#[test]
+fn state_labels_drop_the_offline_reason() {
+    assert_eq!(SourceState::Ready.label(), "Ready");
+    assert_eq!(SourceState::Live.label(), "Live");
+    assert_eq!(
+        SourceState::Offline("window closed".into()).label(),
+        "Offline"
+    );
+    assert_eq!(
+        SourceState::Offline("window closed".into()).to_string(),
+        "Offline: window closed"
+    );
 }
 
 #[test]
