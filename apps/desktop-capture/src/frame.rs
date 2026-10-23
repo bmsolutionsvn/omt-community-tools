@@ -41,6 +41,22 @@ pub fn pad_to_even(frame: FrameData) -> FrameData {
     }
 }
 
+/// Copy `width * 4` bytes of each row, dropping DXGI row padding.
+///
+/// `windows_capture::frame::FrameBuffer::as_nopadding_buffer` is unusable here:
+/// it resizes its scratch vec only when `capacity < frame_size` and then slices
+/// `[0..frame_size]`, so a larger padded frame (above 4K) can panic.
+pub(crate) fn packed_rows(raw: &[u8], width: u32, height: u32, row_pitch: u32) -> Vec<u8> {
+    let row = width as usize * 4;
+    let pitch = row_pitch as usize;
+    let mut bgra = Vec::with_capacity(row * height as usize);
+    for y in 0..height as usize {
+        let start = y * pitch;
+        bgra.extend_from_slice(&raw[start..start + row]);
+    }
+    bgra
+}
+
 /// Holds only the newest frame: the sender thread drains it, the capture
 /// thread overwrites it, and a slow sender never queues stale frames.
 #[derive(Default)]
@@ -63,6 +79,29 @@ impl LatestFrame {
     pub fn take_latest(&self) -> Option<Arc<FrameData>> {
         self.slot.lock().take()
     }
+}
+
+#[test]
+fn copies_rows_dropping_pitch_padding() {
+    // 3-wide rows are 12 bytes; give them 16-byte pitch and 4 garbage bytes.
+    let mut raw = Vec::new();
+    for y in 0..3u8 {
+        for x in 0..3u8 {
+            raw.extend_from_slice(&[x, y, 7, 255]);
+        }
+        raw.extend_from_slice(&[0xAA; 4]);
+    }
+    let out = packed_rows(&raw, 3, 3, 16);
+    assert_eq!(out.len(), 3 * 3 * 4);
+    assert_eq!(&out[0..4], &[0, 0, 7, 255]);
+    assert_eq!(&out[12..16], &[0, 1, 7, 255]);
+    assert!(!out.contains(&0xAA));
+}
+
+#[test]
+fn copies_even_frame_unchanged() {
+    let raw: Vec<u8> = (0..16).collect();
+    assert_eq!(packed_rows(&raw, 2, 2, 8), raw);
 }
 
 #[test]

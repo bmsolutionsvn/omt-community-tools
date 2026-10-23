@@ -6,7 +6,7 @@ use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 
-use crate::frame::{FrameData, LatestFrame, pad_to_even};
+use crate::frame::{FrameData, LatestFrame, packed_rows, pad_to_even};
 
 /// Failure while turning a captured frame into a [`FrameData`].
 #[derive(Debug, thiserror::Error)]
@@ -38,8 +38,8 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         let mut buffer = frame.buffer()?;
         let width = buffer.width();
         let height = buffer.height();
-        // The crate reuses this buffer for the next frame, so copy it out.
-        let bgra = buffer.as_nopadding_buffer()?.to_vec();
+        let row_pitch = buffer.row_pitch();
+        let bgra = packed_rows(buffer.as_raw_buffer(), width, height, row_pitch);
         self.sink.store(pad_to_even(FrameData {
             width,
             height,
