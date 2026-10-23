@@ -1,5 +1,7 @@
 //! egui/eframe Desktop Capture application.
 
+use std::time::Duration;
+
 use eframe::egui;
 use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig};
 
@@ -11,6 +13,8 @@ struct Source {
     entry: Entry,
     name: String,
     runtime: Option<SourceRuntime>,
+    /// Why the last start failed, shown under the row name.
+    error: Option<String>,
 }
 
 /// Desktop Capture main window: pick sources, then start and stop them.
@@ -67,12 +71,18 @@ impl DesktopCaptureApp {
             entry,
             name,
             runtime: None,
+            error: None,
         });
     }
 }
 
 impl eframe::App for DesktopCaptureApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        // Rows show live states; keep repainting so a closed window reaches Offline up front.
+        if self.sources.iter().any(|source| source.runtime.is_some()) {
+            ui.ctx().request_repaint_after(Duration::from_secs(1));
+        }
+
         egui::Panel::top("toolbar").show(ui, |ui| {
             ui.horizontal(|ui| {
                 ui.heading("OMT Desktop Capture");
@@ -119,7 +129,6 @@ impl eframe::App for DesktopCaptureApp {
                 return;
             }
             let (quality, codec) = (self.quality, self.codec);
-            let mut error = None;
             for source in &mut self.sources {
                 let mut start = false;
                 let mut stop = false;
@@ -139,6 +148,9 @@ impl eframe::App for DesktopCaptureApp {
                         None => start = ui.button("Start").clicked(),
                     }
                 });
+                if let Some(error) = &source.error {
+                    ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                }
                 if start {
                     let cfg = DesktopSourceConfig {
                         id: source.entry.id.clone(),
@@ -146,15 +158,15 @@ impl eframe::App for DesktopCaptureApp {
                         ..DesktopSourceConfig::default()
                     };
                     match SourceRuntime::start(&cfg, &source.entry, quality, codec) {
-                        Ok(runtime) => source.runtime = Some(runtime),
-                        Err(err) => error = Some(err.to_string()),
+                        Ok(runtime) => {
+                            source.runtime = Some(runtime);
+                            source.error = None;
+                        }
+                        Err(err) => source.error = Some(err.to_string()),
                     }
                 } else if stop && let Some(mut runtime) = source.runtime.take() {
                     runtime.stop();
                 }
-            }
-            if let Some(error) = error {
-                self.status = error;
             }
         });
     }

@@ -166,18 +166,31 @@ impl SourceRuntime {
             ..RowStats::default()
         }));
         let stop = Arc::new(AtomicBool::new(false));
-        let thread = thread::spawn({
-            let sender = Arc::clone(&sender);
-            let stats = Arc::clone(&stats);
-            let stop = Arc::clone(&stop);
-            move || send_loop(sender, sink, stats, stop, fps_n, fps_d, interval)
-        });
-
         let closed_reason = if matches!(entry.id, DesktopSourceId::Window { .. }) {
             "window closed"
         } else {
             "capture ended"
         };
+        let thread = thread::spawn({
+            let sender = Arc::clone(&sender);
+            let flags = Arc::clone(&flags);
+            let stats = Arc::clone(&stats);
+            let stop = Arc::clone(&stop);
+            move || {
+                send_loop(
+                    sender,
+                    sink,
+                    flags,
+                    stats,
+                    stop,
+                    closed_reason,
+                    fps_n,
+                    fps_d,
+                    interval,
+                )
+            }
+        });
+
         Ok(Self {
             sender,
             capture: Mutex::new(Some(capture)),
@@ -191,7 +204,10 @@ impl SourceRuntime {
 
     /// Current counters, marking the source offline once its capture has ended.
     ///
-    /// shortcut: a capture that dies is noticed only when this is polled; add a
+    /// A closed window is noticed by the sender thread, so this is only needed for
+    /// other capture failures.
+    ///
+    /// shortcut: a capture that fails is noticed only when this is polled; add a
     /// watcher thread if a run can sit without polling.
     pub fn stats(&self) -> RowStats {
         let finished = self
@@ -245,11 +261,17 @@ impl Drop for SourceRuntime {
 }
 
 /// Sends one frame per tick until stopped, refreshing [`RowStats`] every second.
+///
+/// `on_closed` sets the shared `closed` flag; the loop marks the row offline and
+/// returns on its next tick, so a closed window never keeps sending its last frame.
+#[allow(clippy::too_many_arguments)]
 fn send_loop(
     sender: Arc<Sender>,
     sink: Arc<LatestFrame>,
+    flags: Arc<CaptureFlags>,
     stats: Arc<Mutex<RowStats>>,
     stop: Arc<AtomicBool>,
+    closed_reason: &'static str,
     fps_n: u32,
     fps_d: u32,
     interval: Duration,
@@ -259,6 +281,13 @@ fn send_loop(
     let mut sampled_at = Instant::now();
     let mut next = Instant::now();
     while !stop.load(Ordering::Relaxed) {
+        if flags.closed.load(Ordering::Relaxed) {
+            *stats.lock() = RowStats {
+                state: SourceState::Offline(closed_reason.to_string()),
+                ..RowStats::default()
+            };
+            return;
+        }
         next += interval;
         if let Some(frame) = pump.next(&sink, clock::now()) {
             let format = VideoFormat {

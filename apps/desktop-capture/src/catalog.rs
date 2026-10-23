@@ -315,6 +315,16 @@ fn reattach_refuses_to_guess() {
 }
 
 #[test]
+fn duplicate_window_titles_are_ambiguous() {
+    let saved = DesktopSourceId::Window {
+        process: "chrome".into(),
+        title: "Inbox".into(),
+    };
+    let twins = [entry("chrome", "Inbox"), entry("chrome", "Inbox")];
+    assert!(matches!(reattach(&saved, &twins), Reattach::Ambiguous));
+}
+
+#[test]
 fn reattach_means_its_rules() {
     // Process matching ignores case and a trailing `.exe`.
     let saved = DesktopSourceId::Window {
