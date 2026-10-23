@@ -1,6 +1,7 @@
 //! Graphics Capture handler feeding a [`LatestFrame`] sink.
 
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
@@ -17,17 +18,25 @@ pub enum CaptureError {
     Frame(#[from] windows_capture::frame::Error),
 }
 
+/// Shared between the capture handler and the runtime that owns it.
+pub struct CaptureFlags {
+    /// Where captured frames go.
+    pub sink: Arc<LatestFrame>,
+    /// Set when the source went away (window closed, display gone).
+    pub closed: AtomicBool,
+}
+
 /// Copies each captured frame into the shared sink; the newest frame wins.
 pub struct CaptureHandler {
-    sink: Arc<LatestFrame>,
+    flags: Arc<CaptureFlags>,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
-    type Flags = Arc<LatestFrame>;
+    type Flags = Arc<CaptureFlags>;
     type Error = CaptureError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { sink: ctx.flags })
+        Ok(Self { flags: ctx.flags })
     }
 
     fn on_frame_arrived(
@@ -42,7 +51,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         let height = buffer.height();
         let row_pitch = buffer.row_pitch();
         let bgra = packed_rows(buffer.as_raw_buffer(), width, height, row_pitch);
-        self.sink.store(pad_to_even(FrameData {
+        self.flags.sink.store(pad_to_even(FrameData {
             width,
             height,
             timestamp,
@@ -52,6 +61,7 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
     }
 
     fn on_closed(&mut self) -> Result<(), Self::Error> {
+        self.flags.closed.store(true, Ordering::Relaxed);
         Ok(())
     }
 }

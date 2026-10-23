@@ -29,6 +29,9 @@ pub enum CatalogError {
     /// The saved source is not on screen any more.
     #[error("source not found: {0}")]
     NotFound(String),
+    /// A saved window is gone or cannot be told apart from another one.
+    #[error("window not attached: {0}")]
+    WindowNotAttached(String),
 }
 
 /// Longest default source name before a ` (2)` uniqueness suffix is added.
@@ -54,6 +57,77 @@ impl TryIntoCaptureItemWithType for CaptureItem {
     }
 }
 
+/// Result of looking for the window a saved source points at.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Reattach {
+    /// Same process and the same title.
+    Exact(Entry),
+    /// Same process, and the found title extends the saved one.
+    Prefix(Entry),
+    /// Same process, and this is its only window.
+    Process(Entry),
+    /// More than one window could be the saved one.
+    Ambiguous,
+    /// Nothing of that process is on screen.
+    Missing,
+}
+
+/// Find `saved` among `entries`: exact window, then title prefix, then the sole window
+/// of the process. Never picks one of several windows; an empty process matches nothing.
+pub fn reattach(saved: &DesktopSourceId, entries: &[Entry]) -> Reattach {
+    let DesktopSourceId::Window { process, title } = saved else {
+        return Reattach::Missing;
+    };
+    let candidates: Vec<&Entry> = entries
+        .iter()
+        .filter(|entry| window_id(entry).is_some_and(|(found, _)| same_process(found, process)))
+        .collect();
+
+    let exact: Vec<&Entry> = candidates
+        .iter()
+        .copied()
+        .filter(|entry| window_id(entry).is_some_and(|(_, found)| found == title))
+        .collect();
+    match exact.as_slice() {
+        [only] => return Reattach::Exact((*only).clone()),
+        [] => {}
+        _ => return Reattach::Ambiguous,
+    }
+
+    let prefix: Vec<&Entry> = candidates
+        .iter()
+        .copied()
+        .filter(|entry| {
+            window_id(entry).is_some_and(|(_, found)| found.starts_with(title.as_str()))
+        })
+        .collect();
+    match prefix.as_slice() {
+        [only] => return Reattach::Prefix((*only).clone()),
+        [] => {}
+        _ => return Reattach::Ambiguous,
+    }
+
+    match candidates.as_slice() {
+        [only] => Reattach::Process((*only).clone()),
+        [] => Reattach::Missing,
+        _ => Reattach::Ambiguous,
+    }
+}
+
+/// Process and title of a window entry; `None` for a monitor.
+fn window_id(entry: &Entry) -> Option<(&str, &str)> {
+    match &entry.id {
+        DesktopSourceId::Window { process, title } => Some((process, title)),
+        DesktopSourceId::Monitor { .. } => None,
+    }
+}
+
+/// Same executable, ignoring case and a trailing `.exe`; an empty name never matches.
+fn same_process(found: &str, saved: &str) -> bool {
+    let (found, saved) = (strip_exe(found), strip_exe(saved));
+    !found.trim().is_empty() && !saved.trim().is_empty() && found.eq_ignore_ascii_case(saved)
+}
+
 /// Re-find the source saved in `entry`.
 pub fn resolve_item(entry: &Entry) -> Result<CaptureItem, CatalogError> {
     match &entry.id {
@@ -62,14 +136,32 @@ pub fn resolve_item(entry: &Entry) -> Result<CaptureItem, CatalogError> {
             .find(|monitor| monitor.device_name().is_ok_and(|name| name == *device))
             .map(CaptureItem::Monitor)
             .ok_or_else(|| CatalogError::NotFound(entry.label.clone())),
-        DesktopSourceId::Window { process, title } => Window::enumerate()?
-            .into_iter()
-            .find(|window| {
-                window.title().is_ok_and(|found| found == *title)
-                    && strip_exe(&window.process_name().unwrap_or_default()) == process
-            })
-            .map(CaptureItem::Window)
-            .ok_or_else(|| CatalogError::NotFound(entry.label.clone())),
+        DesktopSourceId::Window { .. } => {
+            let pairs = window_pairs(std::process::id())?;
+            let entries: Vec<Entry> = pairs.iter().map(|(entry, _)| entry.clone()).collect();
+            let found = match reattach(&entry.id, &entries) {
+                Reattach::Exact(found) | Reattach::Prefix(found) | Reattach::Process(found) => {
+                    found
+                }
+                Reattach::Ambiguous => {
+                    return Err(CatalogError::WindowNotAttached(format!(
+                        "{} matches several windows",
+                        entry.label
+                    )));
+                }
+                Reattach::Missing => {
+                    return Err(CatalogError::WindowNotAttached(format!(
+                        "{} is gone",
+                        entry.label
+                    )));
+                }
+            };
+            pairs
+                .into_iter()
+                .find(|(candidate, _)| *candidate == found)
+                .map(|(_, window)| CaptureItem::Window(window))
+                .ok_or_else(|| CatalogError::NotFound(entry.label.clone()))
+        }
     }
 }
 
@@ -103,7 +195,15 @@ pub fn monitors() -> Result<Vec<Entry>, CatalogError> {
 
 /// All windows we can capture, excluding `self_pid`'s own windows.
 pub fn windows(self_pid: u32) -> Result<Vec<Entry>, CatalogError> {
-    let mut entries = Vec::new();
+    Ok(window_pairs(self_pid)?
+        .into_iter()
+        .map(|(entry, _)| entry)
+        .collect())
+}
+
+/// Every capturable window with its live handle, excluding `self_pid`'s own windows.
+fn window_pairs(self_pid: u32) -> Result<Vec<(Entry, Window)>, CatalogError> {
+    let mut pairs = Vec::new();
     for window in Window::enumerate()? {
         let pid = window.process_id().unwrap_or(0);
         let title = window.title().unwrap_or_default();
@@ -111,16 +211,19 @@ pub fn windows(self_pid: u32) -> Result<Vec<Entry>, CatalogError> {
             continue;
         }
         let process = strip_exe(&window.process_name().unwrap_or_default()).to_string();
-        entries.push(Entry {
-            id: DesktopSourceId::Window {
-                process: process.clone(),
-                title: title.clone(),
+        pairs.push((
+            Entry {
+                id: DesktopSourceId::Window {
+                    process: process.clone(),
+                    title: title.clone(),
+                },
+                label: title,
+                detail: process,
             },
-            label: title,
-            detail: process,
-        });
+            window,
+        ));
     }
-    Ok(entries)
+    Ok(pairs)
 }
 
 /// Whether a window is worth listing: visible to the capture API, not ours, and titled.
@@ -169,7 +272,7 @@ fn strip_exe(process: &str) -> &str {
 }
 
 #[cfg(test)]
-fn window_entry(process: &str, title: &str) -> Entry {
+fn entry(process: &str, title: &str) -> Entry {
     Entry {
         id: DesktopSourceId::Window {
             process: process.into(),
@@ -178,6 +281,77 @@ fn window_entry(process: &str, title: &str) -> Entry {
         label: title.into(),
         detail: String::new(),
     }
+}
+
+#[test]
+fn reattach_prefers_exact_then_prefix_then_sole_process() {
+    let saved = DesktopSourceId::Window {
+        process: "chrome".into(),
+        title: "Inbox".into(),
+    };
+    assert!(matches!(
+        reattach(&saved, &[entry("chrome", "Inbox")]),
+        Reattach::Exact(_)
+    ));
+    assert!(matches!(
+        reattach(&saved, &[entry("chrome", "Inbox - Gmail")]),
+        Reattach::Prefix(_)
+    ));
+    assert!(matches!(
+        reattach(&saved, &[entry("chrome", "Other")]),
+        Reattach::Process(_)
+    ));
+}
+
+#[test]
+fn reattach_refuses_to_guess() {
+    let saved = DesktopSourceId::Window {
+        process: "chrome".into(),
+        title: "Inbox".into(),
+    };
+    let two = [entry("chrome", "A"), entry("chrome", "B")];
+    assert!(matches!(reattach(&saved, &two), Reattach::Ambiguous));
+    assert!(matches!(reattach(&saved, &[]), Reattach::Missing));
+}
+
+#[test]
+fn reattach_means_its_rules() {
+    // Process matching ignores case and a trailing `.exe`.
+    let saved = DesktopSourceId::Window {
+        process: "Chrome.EXE".into(),
+        title: "Inbox".into(),
+    };
+    assert!(matches!(
+        reattach(&saved, &[entry("chrome", "Inbox")]),
+        Reattach::Exact(_)
+    ));
+
+    // An empty process never matches, on either side.
+    let empty = DesktopSourceId::Window {
+        process: String::new(),
+        title: "Inbox".into(),
+    };
+    assert!(matches!(
+        reattach(&empty, &[entry("", "Inbox")]),
+        Reattach::Missing
+    ));
+    assert!(matches!(
+        reattach(&saved, &[entry("", "Inbox")]),
+        Reattach::Missing
+    ));
+
+    // Two windows that both extend the saved title are not guessed between.
+    let short = DesktopSourceId::Window {
+        process: "chrome".into(),
+        title: "In".into(),
+    };
+    assert!(matches!(
+        reattach(
+            &short,
+            &[entry("chrome", "Inbox"), entry("chrome", "Index")]
+        ),
+        Reattach::Ambiguous
+    ));
 }
 
 #[test]
@@ -205,15 +379,15 @@ fn names_are_made_unique() {
 #[test]
 fn window_names_join_process_and_title() {
     assert_eq!(
-        default_name(&window_entry("notepad", "Untitled")),
+        default_name(&entry("notepad", "Untitled")),
         "notepad — Untitled"
     );
     assert_eq!(
-        default_name(&window_entry("notepad.exe", "Untitled")),
+        default_name(&entry("notepad.exe", "Untitled")),
         "notepad — Untitled"
     );
     assert_eq!(
-        default_name(&window_entry("NOTEPAD.EXE", "Untitled")),
+        default_name(&entry("NOTEPAD.EXE", "Untitled")),
         "NOTEPAD — Untitled"
     );
 }
@@ -221,7 +395,7 @@ fn window_names_join_process_and_title() {
 #[test]
 fn names_are_truncated_before_numbering() {
     let title = "t".repeat(80);
-    let base = default_name(&window_entry("app", &title));
+    let base = default_name(&entry("app", &title));
     assert_eq!(base.chars().count(), 64);
     let name = unique_name(&base, std::slice::from_ref(&base));
     assert_eq!(name, format!("{base} (2)"));

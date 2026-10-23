@@ -7,7 +7,7 @@ use std::time::{Duration, Instant};
 
 use omthx::{Codec, Mode, Quality, Sender, SenderStats, VideoFormat};
 use parking_lot::Mutex;
-use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig};
+use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig, DesktopSourceId};
 use windows_capture::capture::{
     CaptureControl, GraphicsCaptureApiError, GraphicsCaptureApiHandler,
 };
@@ -16,7 +16,7 @@ use windows_capture::settings::{
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
-use crate::capture::{CaptureError, CaptureHandler};
+use crate::capture::{CaptureError, CaptureFlags, CaptureHandler};
 use crate::catalog::{self, Entry};
 use crate::clock;
 use crate::frame::{FrameData, LatestFrame};
@@ -110,6 +110,8 @@ impl FramePump {
 pub struct SourceRuntime {
     sender: Arc<Sender>,
     capture: Mutex<Option<CaptureControl<CaptureHandler, CaptureError>>>,
+    flags: Arc<CaptureFlags>,
+    closed_reason: &'static str,
     stats: Arc<Mutex<RowStats>>,
     stop: Arc<AtomicBool>,
     thread: Option<JoinHandle<()>>,
@@ -143,6 +145,10 @@ impl SourceRuntime {
             CursorCaptureSettings::WithoutCursor
         };
         let sink = Arc::new(LatestFrame::default());
+        let flags = Arc::new(CaptureFlags {
+            sink: sink.clone(),
+            closed: AtomicBool::new(false),
+        });
         let settings = Settings::new(
             item,
             cursor,
@@ -151,7 +157,7 @@ impl SourceRuntime {
             MinimumUpdateIntervalSettings::Custom(interval),
             DirtyRegionSettings::Default,
             ColorFormat::Bgra8,
-            sink.clone(),
+            flags.clone(),
         );
         let capture = CaptureHandler::start_free_threaded(settings)?;
 
@@ -167,9 +173,16 @@ impl SourceRuntime {
             move || send_loop(sender, sink, stats, stop, fps_n, fps_d, interval)
         });
 
+        let closed_reason = if matches!(entry.id, DesktopSourceId::Window { .. }) {
+            "window closed"
+        } else {
+            "capture ended"
+        };
         Ok(Self {
             sender,
             capture: Mutex::new(Some(capture)),
+            flags,
+            closed_reason,
             stats,
             stop,
             thread: Some(thread),
@@ -188,6 +201,9 @@ impl SourceRuntime {
             .is_some_and(CaptureControl::is_finished);
         if finished && let Some(control) = self.capture.lock().take() {
             let reason = match control.wait() {
+                Ok(()) if self.flags.closed.load(Ordering::Relaxed) => {
+                    self.closed_reason.to_string()
+                }
                 Ok(()) => "capture ended".to_string(),
                 Err(err) => err.to_string(),
             };
