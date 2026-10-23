@@ -16,6 +16,7 @@ use windows_capture::settings::{
     MinimumUpdateIntervalSettings, SecondaryWindowSettings, Settings,
 };
 
+use crate::audio::AudioRuntime;
 use crate::capture::{CaptureError, CaptureFlags, CaptureHandler};
 use crate::catalog::{self, Entry};
 use crate::clock;
@@ -74,6 +75,8 @@ pub struct RowStats {
     pub connections: i32,
     /// Encode time of the last frame in milliseconds (HX only).
     pub encode_ms: f64,
+    /// Why system audio is not running, if it failed or stopped.
+    pub audio_error: Option<String>,
     /// Lifecycle state.
     pub state: SourceState,
 }
@@ -110,6 +113,7 @@ impl FramePump {
 pub struct SourceRuntime {
     sender: Arc<Sender>,
     capture: Mutex<Option<CaptureControl<CaptureHandler, CaptureError>>>,
+    audio: Option<AudioRuntime>,
     flags: Arc<CaptureFlags>,
     closed_reason: &'static str,
     stats: Arc<Mutex<RowStats>>,
@@ -191,9 +195,24 @@ impl SourceRuntime {
             }
         });
 
+        // `Some("")` is how older saved configs spell "no audio", the same as `None`.
+        let mut audio = None;
+        let mut audio_error = None;
+        if let Some(device) = cfg.audio_device.as_deref().filter(|id| !id.is_empty()) {
+            match AudioRuntime::start(Some(device), Arc::clone(&sender)) {
+                Ok(runtime) => audio = Some(runtime),
+                Err(err) => {
+                    tracing::warn!("{err}");
+                    audio_error = Some(err.to_string());
+                }
+            }
+        }
+        stats.lock().audio_error = audio_error;
+
         Ok(Self {
             sender,
             capture: Mutex::new(Some(capture)),
+            audio,
             flags,
             closed_reason,
             stats,
@@ -210,6 +229,7 @@ impl SourceRuntime {
     /// shortcut: a capture that fails is noticed only when this is polled; add a
     /// watcher thread if a run can sit without polling.
     pub fn stats(&self) -> RowStats {
+        let audio_error = self.audio.as_ref().and_then(AudioRuntime::error);
         let finished = self
             .capture
             .lock()
@@ -226,10 +246,13 @@ impl SourceRuntime {
             self.stop.store(true, Ordering::Relaxed);
             *self.stats.lock() = RowStats {
                 state: SourceState::Offline(reason),
+                audio_error: audio_error.clone(),
                 ..RowStats::default()
             };
         }
-        self.stats.lock().clone()
+        let mut row = self.stats.lock().clone();
+        row.audio_error = audio_error;
+        row
     }
 
     /// Source address a receiver connects to: `HOSTNAME (name)`.
@@ -237,8 +260,11 @@ impl SourceRuntime {
         self.sender.address()
     }
 
-    /// Stop the sender thread and the capture. Safe to call more than once.
+    /// Stop audio, the sender thread and the capture. Safe to call more than once.
     pub fn stop(&mut self) {
+        if let Some(mut audio) = self.audio.take() {
+            audio.stop();
+        }
         self.stop.store(true, Ordering::Relaxed);
         if let Some(thread) = self.thread.take() {
             let _ = thread.join();

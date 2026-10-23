@@ -5,6 +5,7 @@ use std::time::Duration;
 use eframe::egui;
 use suite_core::{DesktopCodec, DesktopQuality, DesktopSourceConfig};
 
+use crate::audio::{self, AudioDevice};
 use crate::catalog::{self, Entry};
 use crate::runtime::SourceRuntime;
 
@@ -12,6 +13,8 @@ use crate::runtime::SourceRuntime;
 struct Source {
     entry: Entry,
     name: String,
+    /// Render endpoint to capture as loopback; `None` sends no audio.
+    audio_device: Option<String>,
     runtime: Option<SourceRuntime>,
     /// Why the last start failed, shown under the row name.
     error: Option<String>,
@@ -22,6 +25,7 @@ pub struct DesktopCaptureApp {
     monitors: Vec<Entry>,
     windows: Vec<Entry>,
     sources: Vec<Source>,
+    audio_devices: Vec<AudioDevice>,
     quality: DesktopQuality,
     codec: DesktopCodec,
     status: String,
@@ -33,6 +37,7 @@ impl Default for DesktopCaptureApp {
             monitors: Vec::new(),
             windows: Vec::new(),
             sources: Vec::new(),
+            audio_devices: Vec::new(),
             quality: DesktopQuality::default(),
             codec: DesktopCodec::default(),
             status: String::new(),
@@ -53,6 +58,9 @@ impl DesktopCaptureApp {
             Ok(entries) => self.windows = entries,
             Err(err) => errors.push(err.to_string()),
         }
+        if let Ok(devices) = audio::devices() {
+            self.audio_devices = devices;
+        }
         self.status = if errors.is_empty() {
             format!(
                 "{} screens · {} windows",
@@ -70,9 +78,22 @@ impl DesktopCaptureApp {
         self.sources.push(Source {
             entry,
             name,
+            audio_device: None,
             runtime: None,
             error: None,
         });
+    }
+}
+
+/// Selected audio device name, or what the combo should say when it is absent.
+fn audio_label(selected: &Option<String>, devices: &[AudioDevice]) -> String {
+    match selected {
+        None => "No audio".into(),
+        Some(id) => devices
+            .iter()
+            .find(|device| &device.id == id)
+            .map(|device| device.name.clone())
+            .unwrap_or_else(|| "Missing device".into()),
     }
 }
 
@@ -129,15 +150,18 @@ impl eframe::App for DesktopCaptureApp {
                 return;
             }
             let (quality, codec) = (self.quality, self.codec);
+            let devices = &self.audio_devices;
             for source in &mut self.sources {
                 let mut start = false;
                 let mut stop = false;
+                let mut audio_error = None;
                 ui.horizontal(|ui| {
                     ui.label(&source.name);
                     ui.weak(&source.entry.detail);
                     match source.runtime.as_ref() {
                         Some(runtime) => {
                             let stats = runtime.stats();
+                            audio_error = stats.audio_error;
                             ui.weak(stats.state.to_string());
                             ui.weak(format!(
                                 "{:.0} fps · {:.2} Mbps · {} conn · {:.1} ms",
@@ -147,14 +171,35 @@ impl eframe::App for DesktopCaptureApp {
                         }
                         None => start = ui.button("Start").clicked(),
                     }
+                    egui::ComboBox::from_id_salt(("audio", source.name.as_str()))
+                        .selected_text(audio_label(&source.audio_device, devices))
+                        .show_ui(ui, |ui| {
+                            ui.selectable_value(&mut source.audio_device, None, "No audio");
+                            for device in devices {
+                                let label = if device.is_default {
+                                    format!("{} (default)", device.name)
+                                } else {
+                                    device.name.clone()
+                                };
+                                ui.selectable_value(
+                                    &mut source.audio_device,
+                                    Some(device.id.clone()),
+                                    label,
+                                );
+                            }
+                        });
                 });
                 if let Some(error) = &source.error {
                     ui.colored_label(ui.visuals().error_fg_color, error.as_str());
+                }
+                if let Some(error) = &audio_error {
+                    ui.colored_label(ui.visuals().warn_fg_color, error.as_str());
                 }
                 if start {
                     let cfg = DesktopSourceConfig {
                         id: source.entry.id.clone(),
                         name: source.name.clone(),
+                        audio_device: source.audio_device.clone(),
                         ..DesktopSourceConfig::default()
                     };
                     match SourceRuntime::start(&cfg, &source.entry, quality, codec) {

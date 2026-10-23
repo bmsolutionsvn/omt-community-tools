@@ -6,6 +6,8 @@
 #[cfg(windows)]
 mod app;
 #[cfg(windows)]
+mod audio;
+#[cfg(windows)]
 mod capture;
 #[cfg(windows)]
 mod catalog;
