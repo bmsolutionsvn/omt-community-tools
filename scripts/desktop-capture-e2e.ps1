@@ -97,9 +97,10 @@ if (-not $sidecarDir) {
 }
 $recv = Join-Path $sidecarDir 'omthx-recv.exe'
 
-# The DLLs live beside the binary in the shipped folder; point the loader at the
-# same build when the release folder has no sidecars of its own.
-if (-not $env:OMTHX_LIBRARY -and -not (Test-Path (Join-Path (Split-Path -Parent $exe) 'omthx.dll'))) {
+# `target\release` only has the exe (and may hold a stray omthx.dll without its
+# FFmpeg siblings). Point the loader at the OMT-HX build; the shipped folder is
+# tested separately by running the packaged exe.
+if (-not $env:OMTHX_LIBRARY) {
     $env:OMTHX_LIBRARY = Join-Path $sidecarDir 'omthx.dll'
 }
 
