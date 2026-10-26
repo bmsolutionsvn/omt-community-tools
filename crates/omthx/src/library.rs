@@ -126,7 +126,9 @@ pub struct Probe {
 #[derive(Debug, Clone, thiserror::Error)]
 pub enum Error {
     /// The HX library could not be found or loaded.
-    #[error("OMT HX needs omthx.dll (Windows) or libomthx.so (Linux) beside the program or on the library path")]
+    #[error(
+        "OMT HX needs omthx.dll (Windows) or libomthx.so (Linux) beside the program or on the library path"
+    )]
     Missing,
     /// The library was found but a call reported an error.
     #[error("{0}")]
@@ -151,8 +153,7 @@ pub(crate) const PIXEL_UYVY: c_int = 1;
 pub(crate) struct Api {
     _lib: libloading::Library,
     pub(crate) error: unsafe extern "C" fn() -> *const c_char,
-    pub(crate) sender_open:
-        unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void,
+    pub(crate) sender_open: unsafe extern "C" fn(*const c_char, c_int, c_int, c_int) -> *mut c_void,
     pub(crate) sender_close: unsafe extern "C" fn(*mut c_void),
     pub(crate) sender_video: unsafe extern "C" fn(
         *mut c_void,
@@ -211,7 +212,9 @@ impl Api {
         if ptr.is_null() {
             return "unknown OMT HX error".into();
         }
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 }
 

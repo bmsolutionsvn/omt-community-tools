@@ -458,7 +458,14 @@ async fn worker_loop(
             publish_buffer_delays(&latest, &playout);
         }
         if pending_disconnect {
-            apply_disconnect(&mut receiver, &mut hx, &latest, &stall, &audio, &mut playout);
+            apply_disconnect(
+                &mut receiver,
+                &mut hx,
+                &latest,
+                &stall,
+                &audio,
+                &mut playout,
+            );
             gpu_decode = false;
             gpu_ctx = None;
         }
@@ -512,7 +519,14 @@ async fn worker_loop(
                         publish_buffer_delays(&latest, &playout);
                     }
                     if pending_disconnect {
-                        apply_disconnect(&mut receiver, &mut hx, &latest, &stall, &audio, &mut playout);
+                        apply_disconnect(
+                            &mut receiver,
+                            &mut hx,
+                            &latest,
+                            &stall,
+                            &audio,
+                            &mut playout,
+                        );
                         gpu_decode = false;
                         gpu_ctx = None;
                     }
@@ -543,7 +557,14 @@ async fn worker_loop(
         // Feed the DAC before any video wait. GPU copy/submit on the eframe
         // device can stall while the window is occluded; audio must not wait.
         if let Some(session) = hx.as_mut() {
-            hx_step(session, &latest, &stall, &audio, &mut playout, &mut hx_stats);
+            hx_step(
+                session,
+                &latest,
+                &stall,
+                &audio,
+                &mut playout,
+                &mut hx_stats,
+            );
             continue;
         }
         let mut got_any = drain_audio_and_meta(receiver.as_ref(), &latest, &mut playout);
@@ -720,6 +741,7 @@ fn publish_buffer_delays(latest: &LatestVideo, playout: &Playout) {
     *latest.audio_buffer_delay_ms.lock() = playout.audio_delay_ms();
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn apply_connect(
     opts: ConnectOptions,
     receiver: &mut Option<ReceiverSession>,
@@ -953,22 +975,23 @@ fn hx_step(
     }
 
     let mut got_frame = false;
-    if let Some(frame) = tokio::task::block_in_place(|| receiver.recv_video(Duration::from_millis(5)))
+    if let Some(frame) =
+        tokio::task::block_in_place(|| receiver.recv_video(Duration::from_millis(5)))
+        && frame.width > 0
+        && frame.height > 0
     {
-        if frame.width > 0 && frame.height > 0 {
-            let video = VideoFrame {
-                width: frame.width,
-                height: frame.height,
-                bgra: Arc::from(frame.bgra),
-                timestamp: frame.timestamp,
-                fps_n: frame.fps_n as i32,
-                fps_d: frame.fps_d.max(1) as i32,
-            };
-            stall.lock().on_frame(video.fps_n, video.fps_d);
-            playout.push_video(video);
-            got_any = true;
-            got_frame = true;
-        }
+        let video = VideoFrame {
+            width: frame.width,
+            height: frame.height,
+            bgra: Arc::from(frame.bgra),
+            timestamp: frame.timestamp,
+            fps_n: frame.fps_n as i32,
+            fps_d: frame.fps_d.max(1) as i32,
+        };
+        stall.lock().on_frame(video.fps_n, video.fps_d);
+        playout.push_video(video);
+        got_any = true;
+        got_frame = true;
     }
 
     let counters = receiver.stats();

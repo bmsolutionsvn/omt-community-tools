@@ -797,7 +797,11 @@ impl MonitorApp {
 
     fn reapply_connection(&mut self) {
         if let Some(url) = self.selected.clone() {
-            self.connect_url(url, self.selected_name.clone(), self.selected_addresses.clone());
+            self.connect_url(
+                url,
+                self.selected_name.clone(),
+                self.selected_addresses.clone(),
+            );
         }
     }
 

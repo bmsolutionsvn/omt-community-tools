@@ -309,7 +309,11 @@ impl MonitorApp {
                                         &format!(":{}", s.port),
                                         selected,
                                     ) {
-                                        self.select(s.url.clone(), s.name.clone(), s.addresses.clone());
+                                        self.select(
+                                            s.url.clone(),
+                                            s.name.clone(),
+                                            s.addresses.clone(),
+                                        );
                                     }
                                 }
                             }

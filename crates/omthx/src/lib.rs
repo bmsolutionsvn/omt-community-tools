@@ -14,4 +14,8 @@ pub use receiver::{Audio, Receiver, ReceiverStats, Video};
 pub use sender::{Sender, SenderStats};
 
 /// File name of the shared library on this platform.
-pub const LIB_NAME: &str = if cfg!(windows) { "omthx.dll" } else { "libomthx.so" };
+pub const LIB_NAME: &str = if cfg!(windows) {
+    "omthx.dll"
+} else {
+    "libomthx.so"
+};

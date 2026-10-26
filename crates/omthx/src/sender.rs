@@ -2,7 +2,7 @@
 
 use std::ffi::{CStr, CString, c_int, c_void};
 
-use crate::library::{Api, Codec, Error, Mode, Quality, VideoFormat, api, PIXEL_BGRA, PIXEL_UYVY};
+use crate::library::{Api, Codec, Error, Mode, PIXEL_BGRA, PIXEL_UYVY, Quality, VideoFormat, api};
 
 /// Counter snapshot from `omthx::SenderStats`.
 #[repr(C)]
@@ -33,7 +33,12 @@ unsafe impl Send for Sender {}
 unsafe impl Sync for Sender {}
 
 /// Refuse a picture the C layer would read past, so a short slice cannot cause UB.
-fn check_picture(format: &VideoFormat, data: &[u8], stride: usize, bpp: usize) -> Result<(), Error> {
+fn check_picture(
+    format: &VideoFormat,
+    data: &[u8],
+    stride: usize,
+    bpp: usize,
+) -> Result<(), Error> {
     let row = (format.width as usize).saturating_mul(bpp);
     let needed = stride.saturating_mul(format.height as usize);
     if stride < row || data.len() < needed {
@@ -49,15 +54,10 @@ impl Sender {
     /// Create a source. In [`Mode::Full`] the codec is ignored.
     pub fn open(name: &str, mode: Mode, quality: Quality, codec: Codec) -> Result<Self, Error> {
         let api = api().ok_or(Error::Missing)?;
-        let name = CString::new(name).map_err(|_| Error::Api("source name contains a NUL".into()))?;
-        let ptr = unsafe {
-            (api.sender_open)(
-                name.as_ptr(),
-                mode.as_c(),
-                quality.as_c(),
-                codec.as_c(),
-            )
-        };
+        let name =
+            CString::new(name).map_err(|_| Error::Api("source name contains a NUL".into()))?;
+        let ptr =
+            unsafe { (api.sender_open)(name.as_ptr(), mode.as_c(), quality.as_c(), codec.as_c()) };
         if ptr.is_null() {
             return Err(Error::Api(api.error_message()));
         }
@@ -166,7 +166,9 @@ impl Sender {
         if ptr.is_null() {
             return String::new();
         }
-        unsafe { CStr::from_ptr(ptr) }.to_string_lossy().into_owned()
+        unsafe { CStr::from_ptr(ptr) }
+            .to_string_lossy()
+            .into_owned()
     }
 
     /// Current counters.
@@ -255,7 +257,13 @@ mod tests {
             return;
         }
         let (width, height) = (320u32, 180u32);
-        let format = VideoFormat { width, height, fps_n: 30, fps_d: 1, alpha: false };
+        let format = VideoFormat {
+            width,
+            height,
+            fps_n: 30,
+            fps_d: 1,
+            alpha: false,
+        };
         let sender =
             Sender::open("OMTHX BGRA Test", Mode::Hx, Quality::Medium, Codec::Hevc).expect("open");
         let address = sender.address();
@@ -300,14 +308,28 @@ mod tests {
             return;
         }
         // 4x4: BGRA rows are 16 bytes (64 total), UYVY rows 8 bytes (32 total).
-        let format = VideoFormat { width: 4, height: 4, fps_n: 30, fps_d: 1, alpha: false };
+        let format = VideoFormat {
+            width: 4,
+            height: 4,
+            fps_n: 30,
+            fps_d: 1,
+            alpha: false,
+        };
         let sender =
             Sender::open("OMTHX Short Test", Mode::Hx, Quality::Low, Codec::Hevc).expect("open");
         let short = |err: Error| err.to_string().contains("picture too small");
         assert!(short(sender.send_bgra(&format, &[], 16, 0).unwrap_err()));
-        assert!(short(sender.send_bgra(&format, &[0u8; 63], 16, 0).unwrap_err()));
-        assert!(short(sender.send_bgra(&format, &[0u8; 64], 8, 0).unwrap_err()));
-        assert!(short(sender.send_uyvy(&format, &[0u8; 31], 8, 0).unwrap_err()));
-        assert!(short(sender.send_uyvy(&format, &[0u8; 32], 4, 0).unwrap_err()));
+        assert!(short(
+            sender.send_bgra(&format, &[0u8; 63], 16, 0).unwrap_err()
+        ));
+        assert!(short(
+            sender.send_bgra(&format, &[0u8; 64], 8, 0).unwrap_err()
+        ));
+        assert!(short(
+            sender.send_uyvy(&format, &[0u8; 31], 8, 0).unwrap_err()
+        ));
+        assert!(short(
+            sender.send_uyvy(&format, &[0u8; 32], 4, 0).unwrap_err()
+        ));
     }
 }

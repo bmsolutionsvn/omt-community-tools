@@ -196,7 +196,11 @@ impl Receiver {
                 &mut out as *mut ReceiverStats as *mut c_void,
             )
         };
-        if ok == 1 { out } else { ReceiverStats::default() }
+        if ok == 1 {
+            out
+        } else {
+            ReceiverStats::default()
+        }
     }
 
     /// The source's picture format as a [`VideoFormat`].

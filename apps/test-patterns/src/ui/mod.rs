@@ -1230,8 +1230,7 @@ impl Render for PatternsView {
                     .child(frame_buffer_control(cx, language, frame_buffer_frames))
                     .child(mode_control(cx, language, send_mode))
                     .children(
-                        (send_mode == SendMode::Hx)
-                            .then(|| codec_control(cx, language, hx_codec)),
+                        (send_mode == SendMode::Hx).then(|| codec_control(cx, language, hx_codec)),
                     )
                     .child(quality_control(cx, language, quality))
                     .child(level_control(
