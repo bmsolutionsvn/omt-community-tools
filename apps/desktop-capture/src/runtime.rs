@@ -100,6 +100,7 @@ pub struct RowStats {
 #[derive(Default)]
 pub struct FramePump {
     last: Option<Arc<FrameData>>,
+    last_ts: i64,
 }
 
 impl FramePump {
@@ -112,7 +113,10 @@ impl FramePump {
             false
         };
         let last = Arc::clone(self.last.as_ref()?);
-        let timestamp = if fresh { last.timestamp } else { now_ticks };
+        // A captured frame can sit in the sink while a slow send runs, so its capture time can trail the
+        // previous repeat's clock time. Timestamps must only go forward for the receiver's pacing.
+        let timestamp = if fresh { last.timestamp } else { now_ticks }.max(self.last_ts + 1);
+        self.last_ts = timestamp;
         Some((last, timestamp))
     }
 }
@@ -583,6 +587,27 @@ fn static_source_repeats_the_last_frame_without_copying_it() {
     let (repeat, repeat_ts) = pump.next(&sink, 200).expect("must resend");
     assert_eq!(repeat_ts, 200);
     assert!(Arc::ptr_eq(&repeat, &first));
+}
+
+#[test]
+fn late_capture_timestamps_stay_increasing() {
+    let sink = LatestFrame::default();
+    let mut pump = FramePump::default();
+    sink.store_from_arc(Arc::new(FrameData {
+        width: 2,
+        height: 2,
+        timestamp: 500,
+        bgra: vec![1; 16],
+    }));
+    assert_eq!(pump.next(&sink, 500).expect("fresh frame").1, 500);
+    // Captured before the frame above was sent, but delivered after it: it still goes out later.
+    sink.store_from_arc(Arc::new(FrameData {
+        width: 2,
+        height: 2,
+        timestamp: 200,
+        bgra: vec![2; 16],
+    }));
+    assert_eq!(pump.next(&sink, 600).expect("late frame").1, 501);
 }
 
 #[test]
