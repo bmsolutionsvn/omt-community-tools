@@ -83,8 +83,8 @@ pub struct RowStats {
     pub fps: f64,
     /// Megabits per second actually sent, sampled over the last second.
     pub mbps: f64,
-    /// OMT connections; each receiver uses two.
-    pub connections: i32,
+    /// Receivers watching this source.
+    pub viewers: u32,
     /// Encode time of the last frame in milliseconds (HX only).
     pub encode_ms: f64,
     /// Why system audio is not running, if it failed or stopped.
@@ -495,9 +495,9 @@ fn send_loop(
                 row.fps = now.frames_sent.saturating_sub(prev.frames_sent) as f64 / elapsed;
                 row.mbps =
                     now.bytes_sent.saturating_sub(prev.bytes_sent) as f64 * 8.0 / elapsed / 1e6;
-                row.connections = now.connections;
+                row.viewers = now.viewers();
                 row.encode_ms = now.encode_ms;
-                row.state = if now.connections > 0 {
+                row.state = if row.viewers > 0 {
                     SourceState::Live
                 } else {
                     SourceState::Ready
@@ -520,8 +520,13 @@ fn mark_offline(stats: &Mutex<RowStats>, reason: &str) {
     row.state = SourceState::Offline(reason.to_string());
     row.fps = 0.0;
     row.mbps = 0.0;
-    row.connections = 0;
+    row.viewers = 0;
     row.encode_ms = 0.0;
+}
+
+/// "1 viewer" or "N viewers".
+pub fn viewers_label(viewers: u32) -> String {
+    format!("{viewers} viewer{}", if viewers == 1 { "" } else { "s" })
 }
 
 /// Live audio error, else the one stored when audio failed to start.
@@ -603,7 +608,7 @@ fn offline_clears_counters_and_keeps_the_audio_message() {
     let stats = Mutex::new(RowStats {
         fps: 30.0,
         mbps: 4.0,
-        connections: 2,
+        viewers: 2,
         encode_ms: 3.0,
         audio_error: Some("audio unavailable: no endpoint".into()),
         state: SourceState::Live,
@@ -615,8 +620,12 @@ fn offline_clears_counters_and_keeps_the_audio_message() {
         SourceState::Offline("OMT-HX: encoder failed".into())
     );
     assert_eq!(
-        (row.fps, row.mbps, row.connections, row.encode_ms),
+        (row.fps, row.mbps, row.viewers, row.encode_ms),
         (0.0, 0.0, 0, 0.0)
+    );
+    assert_eq!(
+        [0, 1, 2].map(viewers_label),
+        ["0 viewers", "1 viewer", "2 viewers"]
     );
     assert_eq!(
         row.audio_error.as_deref(),

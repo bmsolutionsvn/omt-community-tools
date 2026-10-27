@@ -153,8 +153,12 @@ fn selftest(seconds: u32) -> anyhow::Result<()> {
         std::thread::sleep(std::time::Duration::from_secs(1));
         let stats = runtime.stats();
         println!(
-            "{}: {:.1} fps, {:.2} Mbps, {} conn, {:.1} ms",
-            stats.state, stats.fps, stats.mbps, stats.connections, stats.encode_ms
+            "{}: {:.1} fps, {:.2} Mbps, {}, {:.1} ms",
+            stats.state,
+            stats.fps,
+            stats.mbps,
+            runtime::viewers_label(stats.viewers),
+            stats.encode_ms
         );
     }
     runtime.stop();

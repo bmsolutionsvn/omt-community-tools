@@ -558,8 +558,11 @@ impl eframe::App for DesktopCaptureApp {
                     ui.colored_label(colour, pill);
                     if let Some(stats) = &stats {
                         ui.weak(format!(
-                            "{:.0} fps · {:.2} Mbps · {} conn · {:.1} ms",
-                            stats.fps, stats.mbps, stats.connections, stats.encode_ms
+                            "{:.0} fps · {:.2} Mbps · {} · {:.1} ms",
+                            stats.fps,
+                            stats.mbps,
+                            crate::runtime::viewers_label(stats.viewers),
+                            stats.encode_ms
                         ));
                     }
                     match (&row.runtime, &row.entry) {

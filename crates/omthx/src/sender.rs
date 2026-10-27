@@ -22,6 +22,15 @@ pub struct SenderStats {
     pub connections: i32,
 }
 
+impl SenderStats {
+    /// Receivers watching: each opens one video/metadata and one audio connection.
+    // ponytail: pairs connections because the C API has no subscriber count; an audio-only or
+    // video-only receiver skews it. Export libomt's video subscriptions from omthx_c to make it exact.
+    pub fn viewers(&self) -> u32 {
+        (self.connections.max(0) as u32).div_ceil(2)
+    }
+}
+
 /// One OMT source. Video and audio may be sent from two threads, one each.
 pub struct Sender {
     api: &'static Api,
@@ -196,6 +205,18 @@ mod tests {
     use crate::library::available;
     use std::thread;
     use std::time::Duration;
+
+    #[test]
+    fn viewers_pair_connections() {
+        let viewers = |connections| {
+            SenderStats {
+                connections,
+                ..Default::default()
+            }
+            .viewers()
+        };
+        assert_eq!([0, 1, 2, 4, -1].map(viewers), [0, 1, 1, 2, 0]);
+    }
 
     #[test]
     fn hx_loopback_probe_and_receive() {
