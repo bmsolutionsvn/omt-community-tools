@@ -213,9 +213,10 @@ impl TestPatternsConfig {
 #[serde(rename_all = "snake_case")]
 pub enum PlayoutMode {
     /// Hold packets until their timestamps meet the media clock.
-    #[default]
     Synced,
-    /// Present video and audio as they arrive, without timestamp sync.
+    /// Present video and audio as they arrive, without timestamp sync. The default: a monitor shows the
+    /// picture as soon as it has it.
+    #[default]
     Immediate,
 }
 
@@ -273,7 +274,7 @@ impl Default for StudioMonitorConfig {
             stats_audio_open: true,
             stats_source_open: true,
             video_decode: VideoDecodePath::Cpu,
-            playout_mode: PlayoutMode::Synced,
+            playout_mode: PlayoutMode::Immediate,
         }
     }
 }
@@ -689,7 +690,7 @@ mod tests {
         assert!(parsed.stats_audio_open);
         assert!(parsed.stats_source_open);
         assert_eq!(parsed.video_decode, VideoDecodePath::Cpu);
-        assert_eq!(parsed.playout_mode, PlayoutMode::Synced);
+        assert_eq!(parsed.playout_mode, PlayoutMode::Immediate);
     }
 
     #[test]
