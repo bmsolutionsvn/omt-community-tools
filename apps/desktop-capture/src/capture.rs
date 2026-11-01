@@ -7,8 +7,8 @@ use windows_capture::capture::{Context, GraphicsCaptureApiHandler};
 use windows_capture::frame::Frame;
 use windows_capture::graphics_capture_api::InternalCaptureControl;
 
-use crate::clock;
-use crate::frame::{FrameData, LatestFrame, packed_rows, pad_to_even};
+use crate::frame::{FrameData, LatestFrame, Pixels, packed_rows, pad_to_even};
+use crate::gpu::GpuRing;
 
 /// Failure while turning a captured frame into a [`FrameData`].
 #[derive(Debug, thiserror::Error)]
@@ -24,11 +24,15 @@ pub struct CaptureFlags {
     pub sink: Arc<LatestFrame>,
     /// Set when the source went away (window closed, display gone).
     pub closed: AtomicBool,
+    /// Frames stay in video memory. Cleared, for good, when that path fails; frames are then read back.
+    pub gpu: AtomicBool,
 }
 
-/// Copies each captured frame into the shared sink; the newest frame wins.
+/// Puts each captured frame in the shared sink; the newest frame wins.
 pub struct CaptureHandler {
     flags: Arc<CaptureFlags>,
+    /// `None` when the capture device could not be shared with the sender thread.
+    ring: Option<GpuRing>,
 }
 
 impl GraphicsCaptureApiHandler for CaptureHandler {
@@ -36,7 +40,13 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
     type Error = CaptureError;
 
     fn new(ctx: Context<Self::Flags>) -> Result<Self, Self::Error> {
-        Ok(Self { flags: ctx.flags })
+        let ring = GpuRing::new(ctx.device, ctx.device_context)
+            .inspect_err(|err| tracing::warn!("capture stays in memory: {err}"))
+            .ok();
+        Ok(Self {
+            flags: ctx.flags,
+            ring,
+        })
     }
 
     fn on_frame_arrived(
@@ -44,19 +54,33 @@ impl GraphicsCaptureApiHandler for CaptureHandler {
         frame: &mut Frame,
         _capture_control: InternalCaptureControl,
     ) -> Result<(), Self::Error> {
-        // WGC timestamps are QPC since boot; OMT wants the wall-clock epoch.
-        let timestamp = clock::from_qpc(frame.timestamp().Duration);
+        let width = frame.width();
+        let height = frame.height();
+        if self.flags.gpu.load(Ordering::Relaxed)
+            && let Some(ring) = &mut self.ring
+        {
+            // A GPU-to-GPU copy: queued, so this returns at once and the frame goes back to the pool.
+            match ring.copy(frame.as_raw_texture(), width, height) {
+                Ok(texture) => {
+                    self.flags.sink.store(FrameData {
+                        width: width + width % 2,
+                        height: height + height % 2,
+                        pixels: Pixels::Gpu(texture),
+                    });
+                    return Ok(());
+                }
+                Err(err) => {
+                    tracing::warn!(
+                        "copying the frame in video memory failed, reading frames back: {err}"
+                    );
+                    self.flags.gpu.store(false, Ordering::Relaxed);
+                }
+            }
+        }
         let mut buffer = frame.buffer()?;
-        let width = buffer.width();
-        let height = buffer.height();
         let row_pitch = buffer.row_pitch();
         let bgra = packed_rows(buffer.as_raw_buffer(), width, height, row_pitch);
-        self.flags.sink.store(pad_to_even(FrameData {
-            width,
-            height,
-            timestamp,
-            bgra,
-        }));
+        self.flags.sink.store(pad_to_even(width, height, bgra));
         Ok(())
     }
 

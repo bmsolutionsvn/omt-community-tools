@@ -32,6 +32,11 @@ pub fn now() -> i64 {
     (since.as_nanos() / 100) as i64
 }
 
+/// The QPC clock now, on the epoch basis: the one clock video and audio timestamps share.
+pub fn qpc_now() -> i64 {
+    from_qpc(qpc_ticks())
+}
+
 /// `ticks` on the epoch basis WGC's frame timestamps and OMT use.
 pub fn from_qpc(ticks: i64) -> i64 {
     let offset = *EPOCH_OFFSET.get_or_init(|| now() - qpc_ticks());

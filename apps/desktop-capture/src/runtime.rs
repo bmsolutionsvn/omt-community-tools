@@ -20,7 +20,7 @@ use crate::audio::AudioRuntime;
 use crate::capture::{CaptureError, CaptureFlags, CaptureHandler};
 use crate::catalog::{self, Entry};
 use crate::clock;
-use crate::frame::{FrameData, LatestFrame};
+use crate::frame::{FrameData, LatestFrame, Pixels};
 
 /// Failure to start one source.
 #[derive(Debug, thiserror::Error)]
@@ -95,29 +95,34 @@ pub struct RowStats {
 
 /// Supplies the sender thread with a frame every tick.
 ///
-/// A static desktop produces no new captures, so the last frame is re-sent with
-/// a fresh timestamp; receivers need the keepalive to keep showing the picture.
+/// A static desktop produces no new captures, so the last frame is re-sent;
+/// receivers need the keepalive to keep showing the picture.
 #[derive(Default)]
 pub struct FramePump {
     last: Option<Arc<FrameData>>,
-    last_ts: i64,
 }
 
 impl FramePump {
-    /// Newest captured frame, or the previous one with the timestamp to send it under.
-    pub fn next(&mut self, sink: &LatestFrame, now_ticks: i64) -> Option<(Arc<FrameData>, i64)> {
-        let fresh = if let Some(frame) = sink.take_latest() {
+    /// Newest captured frame, or the previous one again.
+    pub fn next(&mut self, sink: &LatestFrame) -> Option<Arc<FrameData>> {
+        if let Some(frame) = sink.take_latest() {
             self.last = Some(frame);
-            true
-        } else {
-            false
-        };
-        let last = Arc::clone(self.last.as_ref()?);
-        // A captured frame can sit in the sink while a slow send runs, so its capture time can trail the
-        // previous repeat's clock time. Timestamps must only go forward for the receiver's pacing.
-        let timestamp = if fresh { last.timestamp } else { now_ticks }.max(self.last_ts + 1);
-        self.last_ts = timestamp;
-        Some((last, timestamp))
+        }
+        self.last.clone()
+    }
+}
+
+/// Hand one frame to the sender, from memory or from video memory.
+fn send_frame(
+    sender: &Sender,
+    format: &VideoFormat,
+    frame: &FrameData,
+    timestamp: i64,
+) -> Result<(), omthx::Error> {
+    match &frame.pixels {
+        Pixels::Cpu(bgra) => sender.send_bgra(format, bgra, frame.width as usize * 4, timestamp),
+        // SAFETY: `frame` holds the texture for the whole call.
+        Pixels::Gpu(texture) => unsafe { sender.send_d3d11(format, texture.as_raw(), timestamp) },
     }
 }
 
@@ -203,6 +208,7 @@ impl SourceRuntime {
         let flags = Arc::new(CaptureFlags {
             sink: sink.clone(),
             closed: AtomicBool::new(false),
+            gpu: AtomicBool::new(sender.current().supports_d3d11()),
         });
         let settings = Settings::new(
             item,
@@ -430,7 +436,15 @@ fn send_loop(
             return;
         }
         next += setup.interval;
-        if let Some((frame, timestamp)) = pump.next(&sink, clock::now()) {
+        // A frame left in video memory after that path failed has no copy in memory: wait for the next capture.
+        // ponytail: a static picture sends nothing until it changes; read the texture back here if that matters.
+        if let Some(frame) = pump
+            .next(&sink)
+            .filter(|f| !f.is_gpu() || flags.gpu.load(Ordering::Relaxed))
+        {
+            // Every frame, new or repeated, is stamped now on the clock audio uses. Capture times arrive late
+            // and unevenly, and mixing them with repeat times made the receiver's timeline jump.
+            let timestamp = clock::qpc_now();
             let format = VideoFormat {
                 width: frame.width,
                 height: frame.height,
@@ -438,12 +452,12 @@ fn send_loop(
                 fps_d: setup.fps_d,
                 alpha: false,
             };
-            let stride = frame.width as usize * 4;
-            match sender
-                .current()
-                .send_bgra(&format, &frame.bgra, stride, timestamp)
-            {
+            match send_frame(&sender.current(), &format, &frame, timestamp) {
                 Ok(()) => failures.accepted(frame.width, frame.height),
+                Err(err) if frame.is_gpu() => {
+                    tracing::warn!("sending from video memory failed, reading frames back: {err}");
+                    flags.gpu.store(false, Ordering::Relaxed);
+                }
                 Err(err) => {
                     tracing::warn!("sending a frame failed: {err}");
                     match failures.failed(frame.width, frame.height) {
@@ -453,12 +467,8 @@ fn send_loop(
                             match reopened {
                                 Ok(reopened) => {
                                     sender.replace(reopened);
-                                    match sender.current().send_bgra(
-                                        &format,
-                                        &frame.bgra,
-                                        stride,
-                                        timestamp,
-                                    ) {
+                                    match send_frame(&sender.current(), &format, &frame, timestamp)
+                                    {
                                         Ok(()) => failures.accepted(frame.width, frame.height),
                                         Err(retry) => {
                                             tracing::warn!(
@@ -571,43 +581,13 @@ fn state_labels_drop_the_offline_reason() {
 fn static_source_repeats_the_last_frame_without_copying_it() {
     let sink = LatestFrame::default();
     let mut pump = FramePump::default();
-    assert!(pump.next(&sink, 100).is_none());
-
-    let captured = Arc::new(FrameData {
-        width: 2,
-        height: 2,
-        timestamp: 10,
-        bgra: vec![1; 16],
-    });
+    assert!(pump.next(&sink).is_none());
+    let captured = Arc::new(crate::frame::pad_to_even(2, 2, vec![1; 16]));
     sink.store_from_arc(Arc::clone(&captured));
-    let (first, first_ts) = pump.next(&sink, 100).expect("fresh frame");
-    assert_eq!(first_ts, 10);
+    let first = pump.next(&sink).expect("fresh frame");
     assert!(Arc::ptr_eq(&first, &captured));
-
-    let (repeat, repeat_ts) = pump.next(&sink, 200).expect("must resend");
-    assert_eq!(repeat_ts, 200);
+    let repeat = pump.next(&sink).expect("must resend");
     assert!(Arc::ptr_eq(&repeat, &first));
-}
-
-#[test]
-fn late_capture_timestamps_stay_increasing() {
-    let sink = LatestFrame::default();
-    let mut pump = FramePump::default();
-    sink.store_from_arc(Arc::new(FrameData {
-        width: 2,
-        height: 2,
-        timestamp: 500,
-        bgra: vec![1; 16],
-    }));
-    assert_eq!(pump.next(&sink, 500).expect("fresh frame").1, 500);
-    // Captured before the frame above was sent, but delivered after it: it still goes out later.
-    sink.store_from_arc(Arc::new(FrameData {
-        width: 2,
-        height: 2,
-        timestamp: 200,
-        bgra: vec![2; 16],
-    }));
-    assert_eq!(pump.next(&sink, 600).expect("late frame").1, 501);
 }
 
 #[test]

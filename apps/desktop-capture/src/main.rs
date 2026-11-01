@@ -16,6 +16,8 @@ mod clock;
 #[cfg(windows)]
 mod frame;
 #[cfg(windows)]
+mod gpu;
+#[cfg(windows)]
 mod runtime;
 
 /// Seconds the headless check sends for when `--seconds` is not given.

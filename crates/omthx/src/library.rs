@@ -164,6 +164,9 @@ pub(crate) struct Api {
         c_int,
         i64,
     ) -> c_int,
+    /// `omthx_c_sender_video_d3d11`; `None` in an omthx.dll that predates it.
+    pub(crate) sender_video_d3d11:
+        Option<unsafe extern "C" fn(*mut c_void, *const CVideoFormat, *mut c_void, i64) -> c_int>,
     pub(crate) sender_audio:
         unsafe extern "C" fn(*mut c_void, *const f32, c_int, c_int, c_int, i64) -> c_int,
     pub(crate) sender_keyframe: unsafe extern "C" fn(*mut c_void),
@@ -315,6 +318,7 @@ impl Api {
             sender_open: unsafe { sym(&lib, b"omthx_c_sender_open\0")? },
             sender_close: unsafe { sym(&lib, b"omthx_c_sender_close\0")? },
             sender_video: unsafe { sym(&lib, b"omthx_c_sender_video\0")? },
+            sender_video_d3d11: unsafe { sym(&lib, b"omthx_c_sender_video_d3d11\0") }.ok(),
             sender_audio: unsafe { sym(&lib, b"omthx_c_sender_audio\0")? },
             sender_keyframe: unsafe { sym(&lib, b"omthx_c_sender_keyframe\0")? },
             sender_address: unsafe { sym(&lib, b"omthx_c_sender_address\0")? },

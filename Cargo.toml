@@ -57,7 +57,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 image = { version = "0.25", default-features = false, features = ["jpeg", "png"] }
 clap = { version = "4", features = ["derive"] }
 cpal = "0.18"
-windows-capture = "=1.5.0"
+windows-capture = "=2.0.1"
 wasapi = "0.26"
 tokio = { version = "1", features = ["rt-multi-thread", "sync", "time", "macros"] }
 

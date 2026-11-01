@@ -1,9 +1,8 @@
 //! Enumerate capturable desktop sources.
 
 use suite_core::DesktopSourceId;
-use windows_capture::WindowsCaptureGraphicsCaptureItem;
 use windows_capture::monitor::Monitor;
-use windows_capture::settings::{CaptureItemTypes, TryIntoCaptureItemWithType};
+use windows_capture::settings::GraphicsCaptureItemType;
 use windows_capture::window::Window;
 
 /// One selectable desktop source.
@@ -46,13 +45,13 @@ pub enum CaptureItem {
     Window(Window),
 }
 
-impl TryIntoCaptureItemWithType for CaptureItem {
-    fn try_into_capture_item(
-        self,
-    ) -> Result<(WindowsCaptureGraphicsCaptureItem, CaptureItemTypes), windows::core::Error> {
+impl TryInto<GraphicsCaptureItemType> for CaptureItem {
+    type Error = windows::core::Error;
+
+    fn try_into(self) -> Result<GraphicsCaptureItemType, Self::Error> {
         match self {
-            Self::Monitor(monitor) => monitor.try_into_capture_item(),
-            Self::Window(window) => window.try_into_capture_item(),
+            Self::Monitor(monitor) => monitor.try_into(),
+            Self::Window(window) => window.try_into(),
         }
     }
 }

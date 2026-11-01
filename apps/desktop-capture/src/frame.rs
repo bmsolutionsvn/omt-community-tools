@@ -4,40 +4,56 @@ use std::sync::Arc;
 
 use parking_lot::Mutex;
 
-/// One BGRA frame, unpadded, timestamped in 100 ns units.
-#[derive(Clone)]
+use crate::gpu::GpuTexture;
+
+/// One captured frame. It carries no time: the sender stamps each frame as it sends it.
 pub struct FrameData {
-    /// Frame width in pixels, always even after `pad_to_even`.
+    /// Frame width in pixels, always even.
     pub width: u32,
-    /// Frame height in pixels, always even after `pad_to_even`.
+    /// Frame height in pixels, always even.
     pub height: u32,
-    /// Capture timestamp in 100 ns units.
-    pub timestamp: i64,
-    /// `width * height * 4` bytes, BGRA order.
-    pub bgra: Vec<u8>,
+    /// Where the picture is.
+    pub pixels: Pixels,
 }
 
-/// Return `frame` unchanged when even, otherwise copy it into an even-sized
-/// black-padded frame: OMT-HX rejects odd dimensions.
-#[must_use]
-pub fn pad_to_even(frame: FrameData) -> FrameData {
-    if frame.width.is_multiple_of(2) && frame.height.is_multiple_of(2) {
-        return frame;
+/// A frame's BGRA picture.
+pub enum Pixels {
+    /// `width * height * 4` bytes in memory.
+    Cpu(Vec<u8>),
+    /// In video memory on the capture device, `width` x `height`.
+    Gpu(Arc<GpuTexture>),
+}
+
+impl FrameData {
+    /// True for a picture in video memory.
+    pub fn is_gpu(&self) -> bool {
+        matches!(self.pixels, Pixels::Gpu(_))
     }
-    let width = frame.width + frame.width % 2;
-    let height = frame.height + frame.height % 2;
-    let row = frame.width as usize * 4;
-    let padded_row = width as usize * 4;
-    let mut bgra = vec![0u8; padded_row * height as usize];
-    for y in 0..frame.height as usize {
-        bgra[y * padded_row..y * padded_row + row]
-            .copy_from_slice(&frame.bgra[y * row..y * row + row]);
+}
+
+/// A `width` x `height` BGRA picture in memory, copied into an even-sized black-padded one when
+/// either side is odd: OMT-HX rejects odd dimensions.
+#[must_use]
+pub fn pad_to_even(width: u32, height: u32, bgra: Vec<u8>) -> FrameData {
+    if width.is_multiple_of(2) && height.is_multiple_of(2) {
+        return FrameData {
+            width,
+            height,
+            pixels: Pixels::Cpu(bgra),
+        };
+    }
+    let padded_width = width + width % 2;
+    let padded_height = height + height % 2;
+    let row = width as usize * 4;
+    let padded_row = padded_width as usize * 4;
+    let mut padded = vec![0u8; padded_row * padded_height as usize];
+    for y in 0..height as usize {
+        padded[y * padded_row..y * padded_row + row].copy_from_slice(&bgra[y * row..y * row + row]);
     }
     FrameData {
-        width,
-        height,
-        timestamp: frame.timestamp,
-        bgra,
+        width: padded_width,
+        height: padded_height,
+        pixels: Pixels::Cpu(padded),
     }
 }
 
@@ -112,37 +128,25 @@ fn pads_odd_frames_with_black() {
             bgra.extend_from_slice(&[x, y, 7, 255]);
         }
     }
-    let out = pad_to_even(FrameData {
-        width: 3,
-        height: 3,
-        timestamp: 0,
-        bgra,
-    });
+    let out = pad_to_even(3, 3, bgra);
     assert_eq!((out.width, out.height), (4, 4));
-    assert_eq!(out.bgra.len(), 4 * 4 * 4);
-    assert_eq!(&out.bgra[0..4], &[0, 0, 7, 255]);
-    assert_eq!(&out.bgra[12..16], &[0, 0, 0, 0]);
-    assert_eq!(&out.bgra[16..20], &[0, 1, 7, 255]);
-    assert!(out.bgra[48..].iter().all(|b| *b == 0));
+    let Pixels::Cpu(padded) = out.pixels else {
+        panic!("padding stays in memory");
+    };
+    assert_eq!(padded.len(), 4 * 4 * 4);
+    assert_eq!(&padded[0..4], &[0, 0, 7, 255]);
+    assert_eq!(&padded[12..16], &[0, 0, 0, 0]);
+    assert_eq!(&padded[16..20], &[0, 1, 7, 255]);
+    assert!(padded[48..].iter().all(|b| *b == 0));
 }
 
 #[test]
 fn latest_frame_replaces_older() {
     let sink = LatestFrame::default();
-    let first = Arc::new(FrameData {
-        width: 2,
-        height: 2,
-        timestamp: 1,
-        bgra: vec![1; 16],
-    });
-    let second = Arc::new(FrameData {
-        width: 2,
-        height: 2,
-        timestamp: 2,
-        bgra: vec![2; 16],
-    });
+    let first = Arc::new(pad_to_even(2, 2, vec![1; 16]));
+    let second = Arc::new(pad_to_even(2, 2, vec![2; 16]));
     sink.store_from_arc(first);
-    sink.store_from_arc(second);
-    assert_eq!(sink.take_latest().unwrap().timestamp, 2);
+    sink.store_from_arc(Arc::clone(&second));
+    assert!(Arc::ptr_eq(&sink.take_latest().unwrap(), &second));
     assert!(sink.take_latest().is_none());
 }

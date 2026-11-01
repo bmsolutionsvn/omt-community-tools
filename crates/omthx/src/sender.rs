@@ -135,6 +135,36 @@ impl Sender {
         }
     }
 
+    /// True when the library can take pictures already in video memory ([`Sender::send_d3d11`]).
+    pub fn supports_d3d11(&self) -> bool {
+        self.api.sender_video_d3d11.is_some()
+    }
+
+    /// Send a BGRA picture already in video memory: an `ID3D11Texture2D` at least `format`'s size, read from
+    /// its top-left corner, without alpha. The texture's own device converts and encodes it; the texture can be
+    /// reused once this returns. Windows only.
+    ///
+    /// # Safety
+    /// `texture` must be a live `ID3D11Texture2D` for the whole call.
+    pub unsafe fn send_d3d11(
+        &self,
+        format: &VideoFormat,
+        texture: *mut c_void,
+        timestamp: i64,
+    ) -> Result<(), Error> {
+        let Some(send) = self.api.sender_video_d3d11 else {
+            return Err(Error::Api(
+                "this omthx.dll cannot send D3D11 textures".into(),
+            ));
+        };
+        let c = format.to_c();
+        if unsafe { send(self.ptr, &c, texture, timestamp) } == 1 {
+            Ok(())
+        } else {
+            Err(Error::Api(self.api.error_message()))
+        }
+    }
+
     /// Send planar f32 audio: all samples of channel 0, then channel 1, and so on.
     pub fn send_audio_planar(
         &self,
