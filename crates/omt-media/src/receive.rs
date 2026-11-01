@@ -801,7 +801,7 @@ async fn apply_connect(
         }
         if force_hx || hx_info.is_some() {
             let address = opts.address.clone().unwrap_or_else(|| url.clone());
-            return connect_hx(&url, &address, hx_info, latest, hx).await;
+            return connect_hx(&url, &address, opts.preview, hx_info, latest, hx).await;
         }
     } else {
         HX_HINT.call_once(|| {
@@ -908,12 +908,14 @@ fn codec_label(codec: omthx::Codec) -> &'static str {
 async fn connect_hx(
     url: &str,
     address: &str,
+    preview: bool,
     info: Option<omthx::Probe>,
     latest: &LatestVideo,
     hx: &mut Option<omthx::Receiver>,
 ) -> bool {
     let address = address.to_string();
-    let opened = tokio::task::spawn_blocking(move || omthx::Receiver::open(&address)).await;
+    let opened =
+        tokio::task::spawn_blocking(move || omthx::Receiver::open(&address, preview)).await;
     let mut receiver = match opened {
         Ok(Ok(receiver)) => receiver,
         Ok(Err(e)) => {

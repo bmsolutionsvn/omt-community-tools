@@ -179,7 +179,7 @@ pub(crate) struct Api {
         *mut c_int,
         *mut c_int,
     ) -> c_int,
-    pub(crate) receiver_open: unsafe extern "C" fn(*const c_char) -> *mut c_void,
+    pub(crate) receiver_open: unsafe extern "C" fn(*const c_char, c_int) -> *mut c_void,
     pub(crate) receiver_close: unsafe extern "C" fn(*mut c_void),
     pub(crate) receiver_video: unsafe extern "C" fn(
         *mut c_void,

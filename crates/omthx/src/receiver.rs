@@ -78,12 +78,13 @@ pub struct Receiver {
 unsafe impl Send for Receiver {}
 
 impl Receiver {
-    /// Connect to `address` (`HOST (name)` or `omt://host:port`).
-    pub fn open(address: &str) -> Result<Self, Error> {
+    /// Connect to `address` (`HOST (name)` or `omt://host:port`). `preview` asks an HX source for its small
+    /// low-bandwidth stream (640 wide at most) instead of the full picture.
+    pub fn open(address: &str, preview: bool) -> Result<Self, Error> {
         let api = api().ok_or(Error::Missing)?;
         let address =
             CString::new(address).map_err(|_| Error::Api("address contains a NUL".into()))?;
-        let ptr = unsafe { (api.receiver_open)(address.as_ptr()) };
+        let ptr = unsafe { (api.receiver_open)(address.as_ptr(), c_int::from(preview)) };
         if ptr.is_null() {
             return Err(Error::Api(api.error_message()));
         }

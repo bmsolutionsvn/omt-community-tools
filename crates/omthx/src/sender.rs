@@ -287,7 +287,7 @@ mod tests {
         assert!(probe.is_some(), "probe found no picture");
         assert_eq!(probe.unwrap().mode, Mode::Hx);
 
-        let mut receiver = crate::Receiver::open(&address).expect("open receiver");
+        let mut receiver = crate::Receiver::open(&address, false).expect("open receiver");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut video = None;
         while video.is_none() && std::time::Instant::now() < deadline {
@@ -300,6 +300,57 @@ mod tests {
         assert_eq!(video.height, height);
         assert_eq!(video.bgra.len(), (width * height * 4) as usize);
         assert!(sender.stats().frames_sent > 0);
+    }
+
+    /// `preview` reaches the C API: the full receiver gets the full picture, the preview one the small stream.
+    #[test]
+    fn hx_preview_flag_picks_the_stream() {
+        if !available() {
+            return;
+        }
+        let (width, height) = (1280u32, 720u32);
+        let format = VideoFormat {
+            width,
+            height,
+            fps_n: 30,
+            fps_d: 1,
+            alpha: false,
+        };
+        let sender = std::sync::Arc::new(
+            Sender::open("OMTHX Preview Flag Test", Mode::Hx, Quality::Medium, Codec::Hevc)
+                .expect("open"),
+        );
+        let address = sender.address();
+        let frame = vec![128u8; (width * height * 4) as usize];
+        let running = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(true));
+        let writer = {
+            let sender = std::sync::Arc::clone(&sender);
+            let running = std::sync::Arc::clone(&running);
+            thread::spawn(move || {
+                let mut ts = 0i64;
+                while running.load(std::sync::atomic::Ordering::Relaxed) {
+                    let _ = sender.send_bgra(&format, &frame, (width * 4) as usize, ts);
+                    ts += 333_333;
+                    thread::sleep(Duration::from_millis(30));
+                }
+            })
+        };
+        let size = |preview: bool| {
+            let mut receiver = crate::Receiver::open(&address, preview).expect("open receiver");
+            let deadline = std::time::Instant::now() + Duration::from_secs(5);
+            while std::time::Instant::now() < deadline {
+                if let Some(video) = receiver.recv_video(Duration::from_millis(100)) {
+                    return Some((video.width, video.height));
+                }
+            }
+            None
+        };
+        let full = size(false);
+        let small = size(true);
+        running.store(false, std::sync::atomic::Ordering::Relaxed);
+        let _ = writer.join();
+        assert_eq!(full, Some((1280, 720)));
+        assert_eq!(small, Some((640, 360)));
     }
 
     #[test]
@@ -339,7 +390,7 @@ mod tests {
                 }
             })
         };
-        let mut receiver = crate::Receiver::open(&address).expect("open receiver");
+        let mut receiver = crate::Receiver::open(&address, false).expect("open receiver");
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         let mut video = None;
         while video.is_none() && std::time::Instant::now() < deadline {
