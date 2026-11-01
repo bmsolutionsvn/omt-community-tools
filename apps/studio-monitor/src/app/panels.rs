@@ -9,6 +9,7 @@ use super::{
     TITLE_SAFE_FRAC, TOOLBAR_H, clamp_log_h, clamp_sidebar_w, clamp_stats_w,
 };
 use crate::chrome::UiChrome;
+use crate::settings::VideoQualityPreset;
 
 /// Fixed row height so the log ScrollArea only shapes on-screen lines.
 const LOG_ROW_H: f32 = 16.0;
@@ -202,6 +203,25 @@ impl MonitorApp {
                             RichText::new(t(self.language, "monitor.audio_unavailable"))
                                 .color(chrome.text),
                         );
+                    }
+                    // The source's small, low-bandwidth stream or its full picture; same setting as
+                    // Preferences' "Low Bandwidth" quality.
+                    let preview = self.settings.quality == VideoQualityPreset::LowBandwidth;
+                    let full_clicked =
+                        chip(ui, chrome, t(self.language, "monitor.view_full"), !preview);
+                    let preview_clicked = chip(
+                        ui,
+                        chrome,
+                        t(self.language, "monitor.view_preview"),
+                        preview,
+                    );
+                    if (full_clicked && preview) || (preview_clicked && !preview) {
+                        self.settings.quality = if preview {
+                            VideoQualityPreset::Default
+                        } else {
+                            VideoQualityPreset::LowBandwidth
+                        };
+                        self.reapply_connection();
                     }
                     ui.label(
                         RichText::new(format!("{:.0}%", self.zoom * 100.0)).color(chrome.text),
