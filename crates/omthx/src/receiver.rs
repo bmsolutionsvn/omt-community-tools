@@ -72,6 +72,7 @@ pub struct Receiver {
     api: &'static Api,
     ptr: *mut c_void,
     decoder: String,
+    encoder: String,
 }
 
 unsafe impl Send for Receiver {}
@@ -90,6 +91,7 @@ impl Receiver {
             api,
             ptr,
             decoder: String::new(),
+            encoder: String::new(),
         };
         receiver.request_keyframe();
         Ok(receiver)
@@ -185,6 +187,20 @@ impl Receiver {
                 .into_owned();
         }
         &self.decoder
+    }
+
+    /// The source's own encoder, for example `hevc_amf (d3d11)`; empty when the source does not say.
+    pub fn encoder(&mut self) -> &str {
+        self.encoder.clear();
+        if let Some(encoder) = self.api.receiver_encoder {
+            let ptr = unsafe { encoder(self.ptr) };
+            if !ptr.is_null() {
+                self.encoder = unsafe { CStr::from_ptr(ptr) }
+                    .to_string_lossy()
+                    .into_owned();
+            }
+        }
+        &self.encoder
     }
 
     /// Current counters.

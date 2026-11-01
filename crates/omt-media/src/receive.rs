@@ -3,7 +3,7 @@
 use std::collections::VecDeque;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Once};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use openmediatransport::{
     DecodedVideoGpuFrame, FrameType, GpuVideoContext, OmtError, Quality, ReceiverConfig,
@@ -124,6 +124,8 @@ pub struct LatestVideo {
     pub source_mode: Mutex<Option<omthx::Mode>>,
     /// Decoder in use, for example `hevc (d3d11va)`; `None` for Full and while disconnected.
     pub decoder: Mutex<Option<String>>,
+    /// The source's own encoder, for example `hevc_amf (d3d11)`; `None` until it says so.
+    pub encoder: Mutex<Option<String>>,
     /// Effective video buffer delay currently applied (milliseconds).
     pub video_buffer_delay_ms: Mutex<u32>,
     /// Effective audio buffer delay currently applied (milliseconds).
@@ -151,6 +153,7 @@ impl Default for LatestVideo {
             audio_levels: Mutex::new(AudioLevels::default()),
             source_mode: Mutex::new(None),
             decoder: Mutex::new(None),
+            encoder: Mutex::new(None),
             video_buffer_delay_ms: Mutex::new(0),
             audio_buffer_delay_ms: Mutex::new(0),
             metadata_log: Mutex::new(VecDeque::new()),
@@ -776,6 +779,7 @@ async fn apply_connect(
     *latest.video_decode.lock() = None;
     *latest.source_mode.lock() = None;
     *latest.decoder.lock() = None;
+    *latest.encoder.lock() = None;
     let url = opts.url.clone();
     // Ask the source what it sends. A timeout means Full, the path that needs no HX library.
     if omthx::available() {
@@ -870,6 +874,7 @@ fn apply_disconnect(
     *latest.video_decode.lock() = None;
     *latest.source_mode.lock() = None;
     *latest.decoder.lock() = None;
+    *latest.encoder.lock() = None;
     *latest.stats.lock() = SessionStatistics::default();
     latest.clear_video();
     *latest.audio_levels.lock() = AudioLevels::default();
@@ -887,6 +892,8 @@ static HX_HINT: Once = Once::new();
 struct HxStats {
     decode_ns: u64,
     peak_ns: u64,
+    /// When the source's encoder name was last read.
+    encoder_read: Option<Instant>,
 }
 
 fn codec_label(codec: omthx::Codec) -> &'static str {
@@ -951,7 +958,11 @@ fn hx_step(
     stall: &Mutex<StallDetector>,
     audio: &AudioOutput,
     playout: &mut Playout,
-    HxStats { decode_ns, peak_ns }: &mut HxStats,
+    HxStats {
+        decode_ns,
+        peak_ns,
+        encoder_read,
+    }: &mut HxStats,
 ) {
     let mut got_any = false;
     loop {
@@ -1001,6 +1012,16 @@ fn hx_step(
             let name = receiver.decoder().to_string();
             if !name.is_empty() {
                 *latest.decoder.lock() = Some(name);
+            }
+        }
+        // The source reports its own encoder in the frame metadata, so this appears with the first picture too.
+        // Read again every second: a source can switch encoder mid-run (a GPU path falling back to memory).
+        if encoder_read.is_none_or(|at| at.elapsed() >= Duration::from_secs(1)) {
+            *encoder_read = Some(Instant::now());
+            let name = receiver.encoder();
+            let mut shown = latest.encoder.lock();
+            if !name.is_empty() && shown.as_deref() != Some(name) {
+                *shown = Some(name.to_string());
             }
         }
         let last = (counters.decode_ms.max(0.0) * 1_000_000.0) as u64;

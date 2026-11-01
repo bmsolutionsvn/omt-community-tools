@@ -112,6 +112,8 @@ struct MonitorApp {
     source_mode: Option<omthx::Mode>,
     /// HX decoder in use.
     decoder: Option<String>,
+    /// The source's own encoder, when it reports one.
+    encoder: Option<String>,
     status: String,
     frame_w: u32,
     frame_h: u32,
@@ -243,6 +245,7 @@ impl MonitorApp {
             selected_name: None,
             source_mode: None,
             decoder: None,
+            encoder: None,
             status: String::new(),
             frame_w: 0,
             frame_h: 0,
@@ -651,6 +654,7 @@ impl MonitorApp {
             self.active_video_decode = video_decode;
             self.source_mode = *self.worker.latest().source_mode.lock();
             self.decoder = self.worker.latest().decoder.lock().clone();
+            self.encoder = self.worker.latest().encoder.lock().clone();
             if self.settings.buffer.linked {
                 let (fps_n, fps_d) = self.buffer_fps();
                 let before = self.settings.buffer;
@@ -753,6 +757,7 @@ impl MonitorApp {
         self.selected_addresses.clear();
         self.source_mode = None;
         self.decoder = None;
+        self.encoder = None;
         *self.prep_ctrl.selected_url.lock() = None;
         self.prep_ctrl.slot.store(None);
         self.prep_ctrl.notify();

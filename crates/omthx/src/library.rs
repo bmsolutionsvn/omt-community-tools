@@ -202,6 +202,8 @@ pub(crate) struct Api {
     pub(crate) receiver_mode: unsafe extern "C" fn(*mut c_void) -> c_int,
     pub(crate) receiver_codec: unsafe extern "C" fn(*mut c_void) -> c_int,
     pub(crate) receiver_decoder: unsafe extern "C" fn(*mut c_void) -> *const c_char,
+    /// `omthx_c_receiver_encoder`; `None` in an omthx.dll that predates it.
+    pub(crate) receiver_encoder: Option<unsafe extern "C" fn(*mut c_void) -> *const c_char>,
     pub(crate) receiver_get_counters: unsafe extern "C" fn(*mut c_void, *mut c_void) -> c_int,
 }
 
@@ -332,6 +334,7 @@ impl Api {
             receiver_mode: unsafe { sym(&lib, b"omthx_c_receiver_mode\0")? },
             receiver_codec: unsafe { sym(&lib, b"omthx_c_receiver_codec\0")? },
             receiver_decoder: unsafe { sym(&lib, b"omthx_c_receiver_decoder\0")? },
+            receiver_encoder: unsafe { sym(&lib, b"omthx_c_receiver_encoder\0") }.ok(),
             receiver_get_counters: unsafe { sym(&lib, b"omthx_c_receiver_get_counters\0")? },
             _lib: lib,
         })

@@ -416,6 +416,9 @@ impl MonitorApp {
                             if let Some(decoder) = &self.decoder {
                                 stat_row(ui, chrome, "Decoder", decoder.clone());
                             }
+                            if let Some(encoder) = &self.encoder {
+                                stat_row(ui, chrome, "Source encoder", encoder.clone());
+                            }
                             stat_row(
                                 ui,
                                 chrome,
